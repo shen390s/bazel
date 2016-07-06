@@ -13,11 +13,14 @@
 // limitations under the License.
 package com.google.devtools.build.lib.runtime.commands;
 
+import static com.google.devtools.build.lib.packages.Rule.ALL_LABELS;
+
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
 import com.google.devtools.build.lib.Constants;
+import com.google.devtools.build.lib.analysis.NoBuildEvent;
 import com.google.devtools.build.lib.collect.CompactHashSet;
 import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.packages.Target;
@@ -138,7 +141,7 @@ public final class QueryCommand implements BlazeCommand {
         queryOptions.universeScope, queryOptions.loadingPhaseThreads,
         settings);
 
-    // 1. Parse query:
+    // 1. Parse and transform query:
     QueryExpression expr;
     try {
       expr = QueryExpression.parse(query, queryEnv);
@@ -147,6 +150,7 @@ public final class QueryCommand implements BlazeCommand {
           null, "Error while parsing '" + query + "': " + e.getMessage()));
       return ExitCode.COMMAND_LINE_ERROR;
     }
+    expr = queryEnv.transformParsedQuery(expr);
 
     QueryEvalResult result;
     PrintStream output = null;
@@ -161,10 +165,13 @@ public final class QueryCommand implements BlazeCommand {
     } else {
       callback = new AggregateAllOutputFormatterCallback<>();
     }
+    boolean catastrophe = true;
     try {
       callback.start();
       result = queryEnv.evaluateQuery(expr, callback);
+      catastrophe = false;
     } catch (QueryException e) {
+      catastrophe = false;
       // Keep consistent with reportBuildFileError()
       env.getReporter()
          // TODO(bazel-team): this is a kludge to fix a bug observed in the wild. We should make
@@ -172,6 +179,7 @@ public final class QueryCommand implements BlazeCommand {
          .handle(Event.error(e.getMessage() == null ? e.toString() : e.getMessage()));
       return ExitCode.ANALYSIS_FAILURE;
     } catch (InterruptedException e) {
+      catastrophe = false;
       IOException ioException = callback.getIoException();
       if (ioException == null || ioException instanceof ClosedByInterruptException) {
         env.getReporter().handle(Event.error("query interrupted"));
@@ -181,20 +189,25 @@ public final class QueryCommand implements BlazeCommand {
         return ExitCode.LOCAL_ENVIRONMENTAL_ERROR;
       }
     } catch (IOException e) {
+      catastrophe = false;
       env.getReporter().handle(Event.error("I/O error: " + e.getMessage()));
       return ExitCode.LOCAL_ENVIRONMENTAL_ERROR;
     } finally {
-      if (streamResults) {
-        output.flush();
-      }
-      try {
-        callback.close();
-      } catch (IOException e) {
-        env.getReporter().handle(Event.error("I/O error: " + e.getMessage()));
-        return ExitCode.LOCAL_ENVIRONMENTAL_ERROR;
+      if (!catastrophe) {
+        if (streamResults) {
+          output.flush();
+          queryEnv.afterCommand();
+        }
+        try {
+          callback.close();
+        } catch (IOException e) {
+          env.getReporter().handle(Event.error("I/O error: " + e.getMessage()));
+          return ExitCode.LOCAL_ENVIRONMENTAL_ERROR;
+        }
       }
     }
 
+    env.getEventBus().post(new NoBuildEvent());
     if (!streamResults) {
       disableAnsiCharactersFiltering(env);
       output = new PrintStream(env.getReporter().getOutErr().getOutputStream());
@@ -213,7 +226,17 @@ public final class QueryCommand implements BlazeCommand {
         env.getReporter().handle(Event.error("I/O error: " + e.getMessage()));
         return ExitCode.LOCAL_ENVIRONMENTAL_ERROR;
       } finally {
-        output.flush();
+        queryEnv.afterCommand();
+        // Note that PrintStream#checkError first flushes and then returns whether any
+        // error was ever encountered.
+        if (output.checkError()) {
+          // Unfortunately, there's no way to check the current error status of PrintStream
+          // without forcing a flush, so we don't know whether this error happened before or after
+          // timewise the one we already have from above. Neither choice is always correct, so we
+          // arbitrarily choose the exit code corresponding to the PrintStream's error.
+          env.getReporter().handle(Event.error("I/O error while writing query output"));
+          return ExitCode.LOCAL_ENVIRONMENTAL_ERROR;
+        }
       }
     }
 
@@ -249,12 +272,18 @@ public final class QueryCommand implements BlazeCommand {
     for (BlazeModule module : env.getRuntime().getBlazeModules()) {
       functions.addAll(module.getQueryFunctions());
     }
-    return AbstractBlazeQueryEnvironment.newQueryEnvironment(
+    return env.getRuntime().getQueryEnvironmentFactory().create(
         env.getPackageManager().newTransitiveLoader(),
         env.getSkyframeExecutor(),
         env.getPackageManager(),
         env.newTargetPatternEvaluator(),
-        keepGoing, orderedResults, universeScope, loadingPhaseThreads, env.getReporter(),
+        keepGoing,
+        /*strictScope=*/ true,
+        orderedResults,
+        universeScope,
+        loadingPhaseThreads,
+        /*labelFilter=*/ ALL_LABELS,
+        env.getReporter(),
         settings,
         functions.build(),
         env.getPackageManager().getPackagePath());

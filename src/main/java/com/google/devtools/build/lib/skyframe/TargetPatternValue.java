@@ -18,6 +18,7 @@ import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.cmdline.LabelSyntaxException;
+import com.google.devtools.build.lib.cmdline.PackageIdentifier;
 import com.google.devtools.build.lib.cmdline.ResolvedTargets;
 import com.google.devtools.build.lib.cmdline.ResolvedTargets.Builder;
 import com.google.devtools.build.lib.cmdline.TargetParsingException;
@@ -144,7 +145,7 @@ public final class TargetPatternValue implements SkyValue {
               !positive,
               offset,
               ImmutableSet.<PathFragment>of());
-      SkyKey skyKey = new SkyKey(SkyFunctions.TARGET_PATTERN, targetPatternKey);
+      SkyKey skyKey = SkyKey.create(SkyFunctions.TARGET_PATTERN, targetPatternKey);
       builder.add(new TargetPatternSkyKeyValue(skyKey));
     }
     return builder.build();
@@ -203,6 +204,21 @@ public final class TargetPatternValue implements SkyValue {
 
     public ImmutableSet<PathFragment> getExcludedSubdirectories() {
       return excludedSubdirectories;
+    }
+
+    public ImmutableSet<PathFragment> getAllSubdirectoriesToExclude(
+        Iterable<PathFragment> blacklistedPackagePrefixes) {
+      ImmutableSet.Builder<PathFragment> excludedPathsBuilder = ImmutableSet.builder();
+      excludedPathsBuilder.addAll(getExcludedSubdirectories());
+      for (PathFragment blacklistedPackagePrefix : blacklistedPackagePrefixes) {
+        PackageIdentifier pkgIdForBlacklistedDirectorPrefix = PackageIdentifier.create(
+            parsedPattern.getDirectory().getRepository(),
+            blacklistedPackagePrefix);
+        if (parsedPattern.containsBelowDirectory(pkgIdForBlacklistedDirectorPrefix)) {
+          excludedPathsBuilder.add(blacklistedPackagePrefix);
+        }
+      }
+      return excludedPathsBuilder.build();
     }
 
     @Override

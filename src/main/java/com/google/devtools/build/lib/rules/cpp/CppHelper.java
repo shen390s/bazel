@@ -197,10 +197,10 @@ public class CppHelper {
     try {
       Label label = ruleContext.getLabel().getRelative(labelName);
       for (String prereqKind : LINKOPTS_PREREQUISITE_LABEL_KINDS) {
-        for (FileProvider target : ruleContext
-            .getPrerequisites(prereqKind, Mode.TARGET, FileProvider.class)) {
+        for (TransitiveInfoCollection target : ruleContext
+            .getPrerequisitesIf(prereqKind, Mode.TARGET, FileProvider.class)) {
           if (target.getLabel().equals(label)) {
-            for (Artifact artifact : target.getFilesToBuild()) {
+            for (Artifact artifact : target.getProvider(FileProvider.class).getFilesToBuild()) {
               linkopts.add(artifact.getExecPathString());
             }
             return true;
@@ -212,6 +212,13 @@ public class CppHelper {
     }
     linkopts.add(labelName);
     return false;
+  }
+
+  @Nullable public static FdoSupport getFdoSupport(RuleContext ruleContext) {
+    return ruleContext
+        .getPrerequisite(":cc_toolchain", Mode.TARGET)
+        .getProvider(FdoSupportProvider.class)
+        .getFdoSupport();
   }
 
   /**
@@ -508,8 +515,9 @@ public class CppHelper {
   /**
    * Returns the FDO build subtype.
    */
-  public static String getFdoBuildStamp(CppConfiguration cppConfiguration) {
-    if (cppConfiguration.getFdoSupport().isAutoFdoEnabled()) {
+  public static String getFdoBuildStamp(RuleContext ruleContext) {
+    CppConfiguration cppConfiguration = ruleContext.getFragment(CppConfiguration.class);
+    if (getFdoSupport(ruleContext).isAutoFdoEnabled()) {
       return (cppConfiguration.getLipoMode() == LipoMode.BINARY) ? "ALIPO" : "AFDO";
     }
     if (cppConfiguration.isFdo()) {

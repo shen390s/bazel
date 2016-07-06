@@ -51,12 +51,19 @@ public class ReducedClasspathJavaLibraryBuilder extends SimpleJavaLibraryBuilder
       compressedClasspath =
           build.getDependencyModule().computeStrictClasspath(build.getClassPath());
     }
+    if (compressedClasspath.isEmpty()) {
+      // If the empty classpath is specified and javac is invoked programatically,
+      // javac falls back to using the host classpath. We don't want JavaBuilder
+      // to leak onto the compilation classpath, so we add the (hopefully empty)
+      // class output directory to prevent that from happening.
+      compressedClasspath = build.getClassDir();
+    }
     String[] javacArguments = makeJavacArguments(build, compressedClasspath);
 
     // Compile!
     StringWriter javacOutput = new StringWriter();
     PrintWriter javacOutputWriter = new PrintWriter(javacOutput);
-    Result result = javacRunner.invokeJavac(javacArguments, javacOutputWriter);
+    Result result = javacRunner.invokeJavac(build.getPlugins(), javacArguments, javacOutputWriter);
     javacOutputWriter.close();
 
     // If javac errored out because of missing entries on the classpath, give it another try.
@@ -71,7 +78,7 @@ public class ReducedClasspathJavaLibraryBuilder extends SimpleJavaLibraryBuilder
 
       // Fall back to the regular compile, but add extra checks to catch transitive uses
       javacArguments = makeJavacArguments(build);
-      result = javacRunner.invokeJavac(javacArguments, err);
+      result = javacRunner.invokeJavac(build.getPlugins(), javacArguments, err);
     } else {
       err.print(javacOutput.getBuffer());
     }

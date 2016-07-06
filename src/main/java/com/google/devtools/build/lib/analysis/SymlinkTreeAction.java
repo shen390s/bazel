@@ -14,6 +14,7 @@
 package com.google.devtools.build.lib.analysis;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.devtools.build.lib.actions.AbstractAction;
 import com.google.devtools.build.lib.actions.ActionExecutionContext;
 import com.google.devtools.build.lib.actions.ActionExecutionException;
@@ -21,6 +22,7 @@ import com.google.devtools.build.lib.actions.ActionOwner;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.Executor;
 import com.google.devtools.build.lib.actions.ResourceSet;
+import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.util.Fingerprint;
 import com.google.devtools.build.lib.util.Preconditions;
 import com.google.devtools.build.lib.vfs.PathFragment;
@@ -31,7 +33,8 @@ import javax.annotation.Nullable;
  * Action responsible for the symlink tree creation.
  * Used to generate runfiles and fileset symlink farms.
  */
-public class SymlinkTreeAction extends AbstractAction {
+@Immutable
+public final class SymlinkTreeAction extends AbstractAction {
 
   private static final String GUID = "63412bda-4026-4c8e-a3ad-7deb397728d4";
 
@@ -39,6 +42,7 @@ public class SymlinkTreeAction extends AbstractAction {
   private final Artifact outputManifest;
   private final boolean filesetTree;
   private final PathFragment shExecutable;
+  private final ImmutableMap<String, String> shellEnviroment;
 
   /**
    * Creates SymlinkTreeAction instance.
@@ -60,13 +64,15 @@ public class SymlinkTreeAction extends AbstractAction {
       @Nullable Artifact artifactMiddleman,
       Artifact outputManifest,
       boolean filesetTree,
-      PathFragment shExecutable) {
+      PathFragment shExecutable,
+      ImmutableMap<String, String> shellEnvironment) {
     super(owner, computeInputs(inputManifest, artifactMiddleman), ImmutableList.of(outputManifest));
     Preconditions.checkArgument(outputManifest.getPath().getBaseName().equals("MANIFEST"));
     this.inputManifest = inputManifest;
     this.outputManifest = outputManifest;
     this.filesetTree = filesetTree;
     this.shExecutable = shExecutable;
+    this.shellEnviroment = shellEnvironment;
   }
 
   private static ImmutableList<Artifact> computeInputs(
@@ -113,9 +119,7 @@ public class SymlinkTreeAction extends AbstractAction {
 
   @Override
   public ResourceSet estimateResourceConsumption(Executor executor) {
-    // Return null here to indicate that resources would be managed manually
-    // during action execution.
-    return null;
+    return ResourceSet.ZERO;
   }
 
   @Override
@@ -125,6 +129,6 @@ public class SymlinkTreeAction extends AbstractAction {
     actionExecutionContext
         .getExecutor()
         .getContext(SymlinkTreeActionContext.class)
-        .createSymlinks(this, actionExecutionContext, shExecutable);
+        .createSymlinks(this, actionExecutionContext, shExecutable, shellEnviroment);
   }
 }

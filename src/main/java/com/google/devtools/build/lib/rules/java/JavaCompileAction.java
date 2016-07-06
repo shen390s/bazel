@@ -52,6 +52,7 @@ import com.google.devtools.build.lib.collect.ImmutableIterable;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.collect.nestedset.Order;
+import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadCompatible;
 import com.google.devtools.build.lib.rules.java.JavaConfiguration.JavaClasspathMode;
 import com.google.devtools.build.lib.util.Fingerprint;
@@ -71,8 +72,8 @@ import java.util.Map;
 /**
  * Action that represents a Java compilation.
  */
-@ThreadCompatible
-public class JavaCompileAction extends AbstractAction {
+@ThreadCompatible @Immutable
+public final class JavaCompileAction extends AbstractAction {
   private static final String GUID = "786e174d-ed97-4e79-9f61-ae74430714cf";
 
   private static final ResourceSet LOCAL_RESOURCES =
@@ -100,7 +101,7 @@ public class JavaCompileAction extends AbstractAction {
   /**
    * The path to the extdir to specify to javac.
    */
-  private final Collection<Artifact> extdirInputs;
+  private final ImmutableList<Artifact> extdirInputs;
 
   /**
    * The list of classpath entries to search for annotation processors.
@@ -181,7 +182,7 @@ public class JavaCompileAction extends AbstractAction {
       Artifact outputJar,
       NestedSet<Artifact> classpathEntries,
       ImmutableList<Artifact> bootclasspathEntries,
-      Collection<Artifact> extdirInputs,
+      ImmutableList<Artifact> extdirInputs,
       List<Artifact> processorPath,
       List<String> processorNames,
       Collection<Artifact> messages,
@@ -350,15 +351,23 @@ public class JavaCompileAction extends AbstractAction {
     return ImmutableList.copyOf(commandLine.arguments());
   }
 
+  @VisibleForTesting
+  public Spawn createSpawn() {
+    return new BaseSpawn(
+        getCommand(),
+        ImmutableMap.of("LC_CTYPE", "en_US.UTF-8"),
+        /*executionInfo=*/ ImmutableMap.<String, String>of(),
+        this,
+        LOCAL_RESOURCES);
+  }
+
   @Override
   @ThreadCompatible
   public void execute(ActionExecutionContext actionExecutionContext)
       throws ActionExecutionException, InterruptedException {
     Executor executor = actionExecutionContext.getExecutor();
     try {
-      Spawn spawn = new BaseSpawn(getCommand(), ImmutableMap.<String, String>of(),
-          ImmutableMap.<String, String>of(), this, LOCAL_RESOURCES);
-      getContext(executor).exec(spawn, actionExecutionContext);
+      getContext(executor).exec(createSpawn(), actionExecutionContext);
     } catch (ExecException e) {
       throw e.toActionExecutionException("Java compilation in rule '" + getOwner().getLabel() + "'",
           executor.getVerboseFailures(), this);
@@ -424,7 +433,7 @@ public class JavaCompileAction extends AbstractAction {
 
   @Override
   public ResourceSet estimateResourceConsumption(Executor executor) {
-    if (getContext(executor).isRemotable(getMnemonic(), true)) {
+    if (getContext(executor).willExecuteRemotely(true)) {
       return ResourceSet.ZERO;
     }
     return LOCAL_RESOURCES;
@@ -560,7 +569,7 @@ public class JavaCompileAction extends AbstractAction {
       for (Artifact extjar : extdirInputs) {
         extdirs.add(extjar.getExecPath().getParentDirectory());
       }
-      result.add(Joiner.on(configuration.getHostPathSeparator()).join(extdirs)); 
+      result.add(Joiner.on(configuration.getHostPathSeparator()).join(extdirs));
     }
 
     if (!processorPath.isEmpty()) {
@@ -629,7 +638,8 @@ public class JavaCompileAction extends AbstractAction {
     }
     if (targetLabel != null) {
       result.add("--target_label");
-      if (targetLabel.getPackageIdentifier().getRepository().isDefault()) {
+      if (targetLabel.getPackageIdentifier().getRepository().isDefault()
+          || targetLabel.getPackageIdentifier().getRepository().isMain()) {
         result.add(targetLabel.toString());
       } else {
         // @-prefixed strings will be assumed to be filenames and expanded by
@@ -666,7 +676,7 @@ public class JavaCompileAction extends AbstractAction {
    * Builds the list of mappings between jars on the classpath and their
    * originating targets names.
    */
-  private static ImmutableList<String> addJarsToTargets(
+  static ImmutableList<String> addJarsToTargets(
       NestedSet<Artifact> classpath, Collection<Artifact> directJars) {
     ImmutableList.Builder<String> builder = ImmutableList.builder();
     for (Artifact jar : classpath) {
@@ -677,6 +687,7 @@ public class JavaCompileAction extends AbstractAction {
       Label label = getTargetName(jar);
       builder.add(
           label.getPackageIdentifier().getRepository().isDefault()
+              || label.getPackageIdentifier().getRepository().isMain()
               ? label.toString()
               // Escape '@' prefix for .params file.
               : "@" + label);

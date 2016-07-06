@@ -16,6 +16,7 @@ package com.google.devtools.build.lib.analysis.select;
 import static com.google.common.truth.Truth.assertThat;
 import static org.junit.Assert.assertNull;
 
+import com.google.common.base.Verify;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
 import com.google.devtools.build.lib.cmdline.Label;
@@ -43,6 +44,11 @@ public class AggregatingAttributeMapperTest extends AbstractAttributeMapperTest 
     mapper = AggregatingAttributeMapper.of(rule);
   }
 
+  private static Label getDefaultMallocLabel(Rule rule) {
+    return Verify.verifyNotNull(
+        (Label) rule.getRuleClassObject().getAttributeByName("malloc").getDefaultValueForTesting());
+  }
+
   /**
    * Tests that {@link AggregatingAttributeMapper#visitAttribute} returns an
    * attribute's sole value when declared directly (i.e. not as a configurable dict).
@@ -53,7 +59,7 @@ public class AggregatingAttributeMapperTest extends AbstractAttributeMapperTest 
         "sh_binary(name = 'myrule',",
         "          srcs = ['a.sh'])");
     assertThat(AggregatingAttributeMapper.of(rule).visitAttribute("srcs", BuildType.LABEL_LIST))
-        .containsExactlyElementsIn(ImmutableList.of(ImmutableList.of(Label.create("a", "a.sh"))));
+        .containsExactlyElementsIn(ImmutableList.of(ImmutableList.of(Label.create("@//a", "a.sh"))));
   }
 
   /**
@@ -72,9 +78,9 @@ public class AggregatingAttributeMapperTest extends AbstractAttributeMapperTest 
     assertThat(AggregatingAttributeMapper.of(rule).visitAttribute("srcs", BuildType.LABEL_LIST))
         .containsExactlyElementsIn(
             ImmutableList.of(
-                ImmutableList.of(Label.create("a", "a.sh")),
-                ImmutableList.of(Label.create("a", "b.sh")),
-                ImmutableList.of(Label.create("a", "default.sh"))));
+                ImmutableList.of(Label.create("@//a", "a.sh")),
+                ImmutableList.of(Label.create("@//a", "b.sh")),
+                ImmutableList.of(Label.create("@//a", "default.sh"))));
   }
 
   @Test
@@ -91,10 +97,10 @@ public class AggregatingAttributeMapperTest extends AbstractAttributeMapperTest 
     assertThat(AggregatingAttributeMapper.of(rule).visitAttribute("srcs", BuildType.LABEL_LIST))
         .containsExactlyElementsIn(
             ImmutableList.of(
-                ImmutableList.of(Label.create("a", "a1.sh"), Label.create("a", "a2.sh")),
-                ImmutableList.of(Label.create("a", "a1.sh"), Label.create("a", "b2.sh")),
-                ImmutableList.of(Label.create("a", "b1.sh"), Label.create("a", "a2.sh")),
-                ImmutableList.of(Label.create("a", "b1.sh"), Label.create("a", "b2.sh"))));
+                ImmutableList.of(Label.create("@//a", "a1.sh"), Label.create("@//a", "a2.sh")),
+                ImmutableList.of(Label.create("@//a", "a1.sh"), Label.create("@//a", "b2.sh")),
+                ImmutableList.of(Label.create("@//a", "b1.sh"), Label.create("@//a", "a2.sh")),
+                ImmutableList.of(Label.create("@//a", "b1.sh"), Label.create("@//a", "b2.sh"))));
   }
 
   /**
@@ -130,13 +136,30 @@ public class AggregatingAttributeMapperTest extends AbstractAttributeMapperTest 
         "              '" + BuildType.Selector.DEFAULT_CONDITION_KEY + "': ['default.sh'],",
         "          }))");
 
-    VisitationRecorder recorder = new VisitationRecorder();
+    VisitationRecorder recorder = new VisitationRecorder("srcs");
     AggregatingAttributeMapper.of(rule).visitLabels(recorder);
     assertThat(recorder.labelsVisited)
         .containsExactlyElementsIn(
             ImmutableList.of(
                 "//a:a.sh", "//a:b.sh", "//a:default.sh", "//conditions:a", "//conditions:b"));
   }
+
+  @Test
+  public void testVisitationWithDefaultValues() throws Exception {
+    Rule rule = createRule("a", "myrule",
+        "cc_binary(name = 'myrule',",
+        "    srcs = [],",
+        "    malloc = select({",
+        "        '//conditions:a': None,",
+        "    }))");
+
+    VisitationRecorder recorder = new VisitationRecorder("malloc");
+    AggregatingAttributeMapper.of(rule).visitLabels(recorder);
+    assertThat(recorder.labelsVisited)
+        .containsExactlyElementsIn(
+            ImmutableList.of("//conditions:a", getDefaultMallocLabel(rule).toString()));
+  }
+
 
   @Test
   public void testGetReachableLabels() throws Exception {
@@ -156,16 +179,32 @@ public class AggregatingAttributeMapperTest extends AbstractAttributeMapperTest 
         "    }))");
 
     ImmutableList<Label> valueLabels = ImmutableList.of(
-        Label.create("x", "a.cc"), Label.create("x", "b.cc"), Label.create("x", "always.cc"),
-        Label.create("x", "c.cc"), Label.create("x", "d.cc"), Label.create("x", "default.cc"));
+        Label.create("@//x", "a.cc"), Label.create("@//x", "b.cc"),
+        Label.create("@//x", "always.cc"), Label.create("@//x", "c.cc"),
+        Label.create("@//x", "d.cc"), Label.create("@//x", "default.cc"));
     ImmutableList<Label> keyLabels = ImmutableList.of(
-        Label.create("conditions", "a"), Label.create("conditions", "b"),
-        Label.create("conditions", "c"), Label.create("conditions", "d"));
+        Label.create("@//conditions", "a"), Label.create("@//conditions", "b"),
+        Label.create("@//conditions", "c"), Label.create("@//conditions", "d"));
 
     AggregatingAttributeMapper mapper = AggregatingAttributeMapper.of(rule);
     assertThat(mapper.getReachableLabels("srcs", true))
         .containsExactlyElementsIn(Iterables.concat(valueLabels, keyLabels));
     assertThat(mapper.getReachableLabels("srcs", false)).containsExactlyElementsIn(valueLabels);
+  }
+
+  @Test
+  public void testGetReachableLabelsWithDefaultValues() throws Exception {
+    Rule rule = createRule("a", "myrule",
+        "cc_binary(name = 'myrule',",
+        "    srcs = [],",
+        "    malloc = select({",
+        "        '//conditions:a': None,",
+        "    }))");
+
+    AggregatingAttributeMapper mapper = AggregatingAttributeMapper.of(rule);
+    assertThat(mapper.getReachableLabels("malloc", true))
+        .containsExactly(
+            getDefaultMallocLabel(rule), Label.create("@//conditions", "a"));
   }
 
   @Test

@@ -25,8 +25,6 @@ import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
 import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.events.EventHandler;
-import com.google.devtools.build.lib.events.EventKind;
-import com.google.devtools.build.lib.events.Location;
 import com.google.devtools.build.lib.skylarkinterface.SkylarkValue;
 import com.google.devtools.build.lib.syntax.Printer;
 import com.google.devtools.build.lib.util.Preconditions;
@@ -41,9 +39,9 @@ import java.util.Collection;
 import javax.annotation.Nullable;
 
 /**
- * Abstract implementation of Action which implements basic functionality: the
- * inputs, outputs, and toString method.  Both input and output sets are
- * immutable.
+ * Abstract implementation of Action which implements basic functionality: the inputs, outputs, and
+ * toString method. Both input and output sets are immutable. Subclasses must be generally
+ * immutable - see the documentation on {@link Action}.
  */
 @Immutable @ThreadSafe
 public abstract class AbstractAction implements Action, SkylarkValue {
@@ -123,7 +121,7 @@ public abstract class AbstractAction implements Action, SkylarkValue {
       Iterable<Artifact> outputs) {
     Preconditions.checkNotNull(owner);
     // TODO(bazel-team): Use RuleContext.actionOwner here instead
-    this.owner = new ActionOwnerDescription(owner);
+    this.owner = owner;
     this.tools = CollectionUtils.makeImmutable(tools);
     this.inputs = CollectionUtils.makeImmutable(inputs);
     this.outputs = ImmutableSet.copyOf(outputs);
@@ -231,6 +229,12 @@ public abstract class AbstractAction implements Action, SkylarkValue {
 
   @Override
   public abstract String getMnemonic();
+
+  /**
+   * See the javadoc for {@link com.google.devtools.build.lib.actions.Action} and
+   * {@link com.google.devtools.build.lib.actions.ActionMetadata#getKey()} for the contract for
+   * {@link #computeKey()}.
+   */
   protected abstract String computeKey();
 
   @Override
@@ -369,10 +373,12 @@ public abstract class AbstractAction implements Action, SkylarkValue {
       Path path = output.getPath();
       String ownerString = Label.print(getOwner().getLabel());
       if (path.isDirectory()) {
-        eventHandler.handle(new Event(EventKind.WARNING, getOwner().getLocation(),
-            "output '" + output.prettyPrint() + "' of " + ownerString
-                  + " is a directory; dependency checking of directories is unsound",
-                  ownerString));
+        eventHandler.handle(
+            Event.warn(
+                getOwner().getLocation(),
+                "output '" + output.prettyPrint() + "' of " + ownerString
+                    + " is a directory; dependency checking of directories is unsound")
+                .withTag(ownerString));
       }
     }
   }
@@ -389,11 +395,13 @@ public abstract class AbstractAction implements Action, SkylarkValue {
   }
 
   @Override
-  public abstract ResourceSet estimateResourceConsumption(Executor executor);
+  public boolean shouldReportPathPrefixConflict(ActionAnalysisMetadata action) {
+    return this != action;
+  }
 
   @Override
-  public boolean shouldReportPathPrefixConflict(Action action) {
-    return this != action;
+  public boolean extraActionCanAttach() {
+    return true;
   }
 
   @Override
@@ -430,59 +438,4 @@ public abstract class AbstractAction implements Action, SkylarkValue {
     return getInputs();
   }
 
-  /**
-   * A copying implementation of {@link ActionOwner}.
-   *
-   * <p>ConfiguredTargets implement ActionOwner themselves, but we do not want actions
-   * to keep direct references to configured targets just for a label and a few strings.
-   */
-  @Immutable
-  private static class ActionOwnerDescription implements ActionOwner {
-
-    private final Location location;
-    private final Label label;
-    private final String configurationMnemonic;
-    private final String configurationChecksum;
-    private final String targetKind;
-    private final String additionalProgressInfo;
-
-    private ActionOwnerDescription(ActionOwner originalOwner) {
-      this.location = originalOwner.getLocation();
-      this.label = originalOwner.getLabel();
-      this.configurationMnemonic = originalOwner.getConfigurationMnemonic();
-      this.configurationChecksum = originalOwner.getConfigurationChecksum();
-      this.targetKind = originalOwner.getTargetKind();
-      this.additionalProgressInfo = originalOwner.getAdditionalProgressInfo();
-    }
-
-    @Override
-    public Location getLocation() {
-      return location;
-    }
-
-    @Override
-    public Label getLabel() {
-      return label;
-    }
-
-    @Override
-    public String getConfigurationMnemonic() {
-      return configurationMnemonic;
-    }
-
-    @Override
-    public String getConfigurationChecksum() {
-      return configurationChecksum;
-    }
-
-    @Override
-    public String getTargetKind() {
-      return targetKind;
-    }
-
-    @Override
-    public String getAdditionalProgressInfo() {
-      return additionalProgressInfo;
-    }
-  }
 }

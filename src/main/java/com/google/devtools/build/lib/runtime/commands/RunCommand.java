@@ -32,6 +32,7 @@ import com.google.devtools.build.lib.buildtool.TargetValidator;
 import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.events.Reporter;
 import com.google.devtools.build.lib.exec.SymlinkTreeHelper;
+import com.google.devtools.build.lib.packages.InputFile;
 import com.google.devtools.build.lib.packages.NonconfigurableAttributeMapper;
 import com.google.devtools.build.lib.packages.OutputFile;
 import com.google.devtools.build.lib.packages.Rule;
@@ -39,7 +40,6 @@ import com.google.devtools.build.lib.packages.Target;
 import com.google.devtools.build.lib.packages.TargetUtils;
 import com.google.devtools.build.lib.pkgcache.LoadingFailedException;
 import com.google.devtools.build.lib.runtime.BlazeCommand;
-import com.google.devtools.build.lib.runtime.BlazeRuntime;
 import com.google.devtools.build.lib.runtime.Command;
 import com.google.devtools.build.lib.runtime.CommandEnvironment;
 import com.google.devtools.build.lib.shell.AbnormalTerminationException;
@@ -126,7 +126,6 @@ public class RunCommand implements BlazeCommand  {
 
   @Override
   public ExitCode exec(CommandEnvironment env, OptionsProvider options) {
-    BlazeRuntime runtime = env.getRuntime();
     RunOptions runOptions = options.getOptions(RunOptions.class);
     // This list should look like: ["//executable:target", "arg1", "arg2"]
     List<String> targetAndArgs = options.getResidue();
@@ -146,7 +145,7 @@ public class RunCommand implements BlazeCommand  {
         : ImmutableList.of(targetString);
     BuildRequest request = BuildRequest.create(
         this.getClass().getAnnotation(Command.class).name(), options,
-        runtime.getStartupOptionsProvider(), targets, outErr,
+        env.getRuntime().getStartupOptionsProvider(), targets, outErr,
         env.getCommandId(), env.getCommandStartTime());
 
     currentRunUnder = runUnder;
@@ -242,15 +241,15 @@ public class RunCommand implements BlazeCommand  {
     // replaced with a shorter relative path that uses the symlinks in the workspace.
     PathFragment prettyExecutablePath =
         OutputDirectoryLinksUtils.getPrettyPath(executablePath,
-            runtime.getWorkspaceName(), runtime.getWorkspace(),
+            env.getWorkspaceName(), env.getWorkspace(),
             options.getOptions(BuildRequestOptions.class).getSymlinkPrefix());
     List<String> cmdLine = new ArrayList<>();
     if (runOptions.scriptPath == null) {
-      PathFragment processWrapperPath = runtime.getBinTools().getExecPath(PROCESS_WRAPPER);
+      PathFragment processWrapperPath =
+          env.getBlazeWorkspace().getBinTools().getExecPath(PROCESS_WRAPPER);
       Preconditions.checkNotNull(
           processWrapperPath, PROCESS_WRAPPER + " not found in embedded tools");
-      cmdLine.add(runtime.getDirectories().getExecRoot()
-          .getRelative(processWrapperPath).getPathString());
+      cmdLine.add(env.getExecRoot().getRelative(processWrapperPath).getPathString());
       cmdLine.add("-1");
       cmdLine.add("15");
       cmdLine.add("-");
@@ -356,7 +355,7 @@ public class RunCommand implements BlazeCommand  {
 
     Artifact manifest = runfilesSupport.getRunfilesManifest();
     PathFragment runfilesDir = runfilesSupport.getRunfilesDirectoryExecPath();
-    Path workingDir = env.getRuntime().getExecRoot()
+    Path workingDir = env.getExecRoot()
         .getRelative(runfilesDir)
         .getRelative(runfilesSupport.getRunfiles().getSuffix());
 
@@ -372,8 +371,8 @@ public class RunCommand implements BlazeCommand  {
         manifest.getExecPath(),
         runfilesDir,
         false);
-    helper.createSymlinksUsingCommand(env.getRuntime().getExecRoot(), target.getConfiguration(),
-        env.getRuntime().getBinTools());
+    helper.createSymlinksUsingCommand(env.getExecRoot(), target.getConfiguration(),
+        env.getBlazeWorkspace().getBinTools());
     return workingDir;
   }
 
@@ -495,11 +494,10 @@ public class RunCommand implements BlazeCommand  {
 
   /**
    * Return true iff {@code target} is a rule that has an executable file. This includes
-   * *_test rules, *_binary rules, and generated outputs.
+   * *_test rules, *_binary rules, generated outputs, and inputs.
    */
   private static boolean isExecutable(Target target) {
-    return isOutputFile(target) || isExecutableNonTestRule(target)
-        || TargetUtils.isTestRule(target);
+    return isPlainFile(target) || isExecutableNonTestRule(target) || TargetUtils.isTestRule(target);
   }
 
   /**
@@ -517,7 +515,7 @@ public class RunCommand implements BlazeCommand  {
     return false;
   }
 
-  private static boolean isOutputFile(Target target) {
-    return (target instanceof OutputFile);
+  private static boolean isPlainFile(Target target) {
+    return (target instanceof OutputFile) || (target instanceof InputFile);
   }
 }

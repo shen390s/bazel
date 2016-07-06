@@ -137,7 +137,7 @@ public class StandaloneSpawnStrategy implements SpawnActionContext {
   }
 
   @Override
-  public boolean isRemotable(String mnemonic, boolean remotable) {
+  public boolean willExecuteRemotely(boolean remotable) {
     return false;
   }
 
@@ -195,5 +195,10 @@ public class StandaloneSpawnStrategy implements SpawnActionContext {
       throw new UserExecException("Cannot locate iOS SDK on non-darwin operating system");
     }
     return AppleHostInfo.getSdkRoot(execRoot, developerDir, iosSdkVersion, appleSdkPlatform);
+  }
+
+  @Override
+  public boolean shouldPropagateExecException() {
+    return false;
   }
 }

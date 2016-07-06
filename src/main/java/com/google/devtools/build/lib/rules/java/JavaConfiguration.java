@@ -126,18 +126,14 @@ public final class JavaConfiguration extends Fragment {
 
   private final ImmutableList<String> commandLineJavacFlags;
   private final Label javaLauncherLabel;
-  private final Label javaBuilderTop;
-  private final ImmutableList<String> defaultJavaBuilderJvmOpts;
-  private final Label javaLangtoolsJar;
   private final boolean useIjars;
+  private final boolean useHeaderCompilation;
   private final boolean generateJavaDeps;
   private final JavaClasspathMode experimentalJavaClasspath;
   private final ImmutableList<String> javaWarns;
   private final ImmutableList<String> defaultJvmFlags;
   private final ImmutableList<String> checkedConstraints;
   private final StrictDepsMode strictJavaDeps;
-  private final Label javacBootclasspath;
-  private final Label javacExtdir;
   private final ImmutableList<String> javacOpts;
   private final Label proguardBinary;
   private final ImmutableList<Label> extraProguardSpecs;
@@ -151,24 +147,19 @@ public final class JavaConfiguration extends Fragment {
   private final boolean legacyBazelJavaTest;
 
   JavaConfiguration(boolean generateJavaDeps,
-      List<String> defaultJvmFlags, JavaOptions javaOptions, Label javaToolchain, String javaCpu,
-      ImmutableList<String> defaultJavaBuilderJvmOpts)
+      List<String> defaultJvmFlags, JavaOptions javaOptions, Label javaToolchain, String javaCpu)
           throws InvalidConfigurationException {
     this.commandLineJavacFlags =
         ImmutableList.copyOf(JavaHelper.tokenizeJavaOptions(javaOptions.javacOpts));
     this.javaLauncherLabel = javaOptions.javaLauncher;
-    this.javaBuilderTop = javaOptions.javaBuilderTop;
-    this.defaultJavaBuilderJvmOpts = defaultJavaBuilderJvmOpts;
-    this.javaLangtoolsJar = javaOptions.javaLangtoolsJar;
     this.useIjars = javaOptions.useIjars;
+    this.useHeaderCompilation = javaOptions.headerCompilation;
     this.generateJavaDeps = generateJavaDeps;
     this.experimentalJavaClasspath = javaOptions.experimentalJavaClasspath;
     this.javaWarns = ImmutableList.copyOf(javaOptions.javaWarns);
     this.defaultJvmFlags = ImmutableList.copyOf(defaultJvmFlags);
     this.checkedConstraints = ImmutableList.copyOf(javaOptions.checkedConstraints);
     this.strictJavaDeps = javaOptions.strictJavaDeps;
-    this.javacBootclasspath = javaOptions.javacBootclasspath;
-    this.javacExtdir = javaOptions.javacExtdir;
     this.javacOpts = ImmutableList.copyOf(javaOptions.javacOpts);
     this.proguardBinary = javaOptions.proguard;
     this.extraProguardSpecs = ImmutableList.copyOf(javaOptions.extraProguardSpecs);
@@ -214,31 +205,15 @@ public final class JavaConfiguration extends Fragment {
   }
 
   /**
-   * Returns the default javabuilder jar
-   */
-  public Label getDefaultJavaBuilderJar() {
-    return javaBuilderTop;
-  }
-
-  /**
-   * Returns the default JVM flags to be used when invoking javabuilder.
-   */
-  public ImmutableList<String> getDefaultJavaBuilderJvmFlags() {
-    return defaultJavaBuilderJvmOpts;
-  }
-
-  /**
-   * Returns the default java langtools jar
-   */
-  public Label getDefaultJavaLangtoolsJar() {
-    return javaLangtoolsJar;
-  }
-
-  /**
    * Returns true iff Java compilation should use ijars.
    */
   public boolean getUseIjars() {
     return useIjars;
+  }
+
+  /** Returns true iff Java header compilation is enabled. */
+  public boolean useHeaderCompilation() {
+    return useHeaderCompilation;
   }
 
   /**
@@ -287,14 +262,6 @@ public final class JavaConfiguration extends Fragment {
    */
   public Label getJavaLauncherLabel() {
     return javaLauncherLabel;
-  }
-
-  public Label getJavacBootclasspath() {
-    return javacBootclasspath;
-  }
-
-  public Label getJavacExtdir() {
-    return javacExtdir;
   }
 
   public ImmutableList<String> getJavacOpts() {

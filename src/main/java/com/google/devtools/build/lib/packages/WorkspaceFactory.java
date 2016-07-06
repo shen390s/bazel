@@ -37,6 +37,7 @@ import com.google.devtools.build.lib.syntax.ClassObject;
 import com.google.devtools.build.lib.syntax.Environment;
 import com.google.devtools.build.lib.syntax.Environment.Extension;
 import com.google.devtools.build.lib.syntax.Environment.Frame;
+import com.google.devtools.build.lib.syntax.Environment.Phase;
 import com.google.devtools.build.lib.syntax.EvalException;
 import com.google.devtools.build.lib.syntax.FuncallExpression;
 import com.google.devtools.build.lib.syntax.FunctionSignature;
@@ -73,7 +74,7 @@ public class WorkspaceFactory {
           PackageFactory.PKG_CONTEXT);
 
   private final LegacyBuilder builder;
-  
+
   private final Path installDir;
   private final Path workspaceDir;
   private final Mutability mutability;
@@ -190,7 +191,7 @@ public class WorkspaceFactory {
       importMap = parentImportMap;
     }
     environmentBuilder.setImportedExtensions(importMap);
-    Environment workspaceEnv = environmentBuilder.setLoadingPhase().build();
+    Environment workspaceEnv = environmentBuilder.setPhase(Phase.WORKSPACE).build();
     addWorkspaceFunctions(workspaceEnv, localReporter);
     for (Map.Entry<String, Object> binding : parentVariableBindings.entrySet()) {
       try {
@@ -249,6 +250,7 @@ public class WorkspaceFactory {
       throws NameConflictException {
     this.parentVariableBindings = bindings;
     this.parentImportMap = importMap;
+    builder.setWorkspaceName(aPackage.getWorkspaceName());
     // Transmit the content of the parent package to the new package builder.
     builder.addEvents(aPackage.getEvents());
     if (aPackage.containsErrors()) {
@@ -302,7 +304,7 @@ public class WorkspaceFactory {
               public Object invoke(String name, FuncallExpression ast) throws EvalException {
                 throw new EvalException(
                     ast.getLocation(),
-                    "workspace() function should be used only at the top of the WORKSPACE file.");
+                    "workspace() function should be used only at the top of the WORKSPACE file");
               }
             };
           }
@@ -426,7 +428,7 @@ public class WorkspaceFactory {
   }
 
   private static ClassObject newNativeModule(
-      ImmutableMap<String, BaseFunction> workspaceFunctions) {
+      ImmutableMap<String, BaseFunction> workspaceFunctions, String version) {
     ImmutableMap.Builder<String, Object> builder = new ImmutableMap.Builder<>();
     for (String nativeFunction : Runtime.getFunctionNames(SkylarkNativeModule.class)) {
       builder.put(nativeFunction, Runtime.getFunction(SkylarkNativeModule.class, nativeFunction));
@@ -435,11 +437,12 @@ public class WorkspaceFactory {
       builder.put(function.getKey(), function.getValue());
     }
 
+    builder.put("bazel_version", version);
     return new ClassObject.SkylarkClassObject(builder.build(), "no native function or rule '%s'");
   }
 
-  public static ClassObject newNativeModule(RuleClassProvider ruleClassProvider) {
-    return newNativeModule(createWorkspaceFunctions(ruleClassProvider, false));
+  public static ClassObject newNativeModule(RuleClassProvider ruleClassProvider, String version) {
+    return newNativeModule(createWorkspaceFunctions(ruleClassProvider, false), version);
   }
 
   static {

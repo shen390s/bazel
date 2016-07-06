@@ -21,6 +21,9 @@ import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.events.EventKind;
 import com.google.devtools.build.lib.util.Pair;
 import com.google.devtools.build.lib.util.io.AnsiTerminal;
+import com.google.devtools.build.lib.util.io.AnsiTerminalWriter;
+import com.google.devtools.build.lib.util.io.LineCountingAnsiTerminalWriter;
+import com.google.devtools.build.lib.util.io.LineWrappingAnsiTerminalWriter;
 import com.google.devtools.build.lib.util.io.OutErr;
 
 import org.joda.time.Duration;
@@ -71,12 +74,11 @@ public class FancyTerminalEventHandler extends BlazeCommandEventHandler {
   private static final List<String> SPECIAL_MESSAGES =
       ImmutableList.of(
           "Reading startup options from "
-              + "HKEY_LOCAL_MACHINE\\Software\\Google\\Devtools\\Blaze\\CurrentVersion",
+              + "HKEY_LOCAL_MACHINE\\Software\\Google\\Devtools\\CurrentVersion",
           "Contacting ftp://microsoft.com/win3.1/downloadcenter",
           "Downloading MSVCR71.DLL",
           "Installing Windows Update 37 of 118...",
           "Sending request to Azure server",
-          "Checking whether your copy of Blaze is Genuine",
           "Initializing HAL",
           "Loading NDIS2SUP.VXD",
           "Initializing DRM",
@@ -94,7 +96,6 @@ public class FancyTerminalEventHandler extends BlazeCommandEventHandler {
           "Notifying field agents",
           "Negotiating with killer robots",
           "Searching for cellular signal",
-          "Checking for outstanding GCard expenses",
           "Waiting for workstation CPU temperature to decrease");
 
   private static final Set<Character> PUNCTUATION_CHARACTERS =
@@ -261,33 +262,32 @@ public class FancyTerminalEventHandler extends BlazeCommandEventHandler {
       }
     }
 
-    if (useColor) {
-      terminal.textGreen();
+    LineCountingAnsiTerminalWriter countingWriter = new LineCountingAnsiTerminalWriter(terminal);
+    AnsiTerminalWriter terminalWriter = countingWriter;
+
+    if (useCursorControls) {
+      terminalWriter = new LineWrappingAnsiTerminalWriter(terminalWriter, terminalWidth - 1);
     }
-    int prefixWidth = prefix.length();
-    terminal.writeString(prefix);
-    terminal.resetTerminal();
+
+    if (useColor) {
+      terminalWriter.okStatus();
+    }
+    terminalWriter.append(prefix);
+    terminalWriter.normal();
     if (showTimestamp) {
       String timestamp = timestamp();
-      prefixWidth += timestamp.length();
-      terminal.writeString(timestamp);
+      terminalWriter.append(timestamp);
     }
-    int numLines = 0;
     Iterator<String> lines = LINEBREAK_SPLITTER.split(rest).iterator();
     String firstLine = lines.next();
-    terminal.writeString(firstLine);
-    // Subtract one, because when the line length is the same as the terminal
-    // width, the terminal doesn't line-advance, so we don't want to erase
-    // two lines.
-    numLines += (prefixWidth + firstLine.length() - 1) / terminalWidth + 1;
-    crlf();
+    terminalWriter.append(firstLine);
+    terminalWriter.newline();
     while (lines.hasNext()) {
       String line = lines.next();
-      terminal.writeString(line);
-      crlf();
-      numLines += (line.length() - 1) / terminalWidth + 1;
+      terminalWriter.append(line);
+      terminalWriter.newline();
     }
-    numLinesPreviousErasable = numLines;
+    numLinesPreviousErasable = countingWriter.getWrittenLines();
   }
 
   /**

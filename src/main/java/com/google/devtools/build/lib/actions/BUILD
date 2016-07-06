@@ -18,13 +18,14 @@ java_library(
         "//src/main/java/com/google/devtools/build/lib:packages-internal",
         "//src/main/java/com/google/devtools/build/lib:shell",
         "//src/main/java/com/google/devtools/build/lib:skylarkinterface",
+        "//src/main/java/com/google/devtools/build/lib:unix",
         "//src/main/java/com/google/devtools/build/lib:util",
         "//src/main/java/com/google/devtools/build/lib:vfs",
         "//src/main/java/com/google/devtools/build/skyframe",
         "//src/main/java/com/google/devtools/common/options",
-        "//src/main/protobuf:extra_actions_base_proto",
+        "//src/main/protobuf:extra_actions_base_java_proto",
         "//third_party:jsr305",
-        "//third_party:protobuf",
+        "//third_party/protobuf",
     ],
 )
 

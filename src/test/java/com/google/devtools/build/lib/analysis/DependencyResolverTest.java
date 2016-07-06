@@ -31,7 +31,6 @@ import com.google.devtools.build.lib.packages.NoSuchPackageException;
 import com.google.devtools.build.lib.packages.NoSuchTargetException;
 import com.google.devtools.build.lib.packages.NoSuchThingException;
 import com.google.devtools.build.lib.packages.Target;
-import com.google.devtools.build.lib.testutil.TestRuleClassProvider;
 
 import org.junit.Before;
 import org.junit.Test;
@@ -88,27 +87,13 @@ public class DependencyResolverTest extends AnalysisTestCase {
     scratch.file("" + name + "/BUILD", contents);
   }
 
-  @SafeVarargs
-  private final void setRules(RuleDefinition... rules) throws Exception {
-    ConfiguredRuleClassProvider.Builder builder =
-        new ConfiguredRuleClassProvider.Builder();
-    TestRuleClassProvider.addStandardRules(builder);
-    for (RuleDefinition rule : rules) {
-      builder.addRuleDefinition(rule);
-    }
-
-    useRuleClassProvider(builder.build());
-    update();
-  }
-
-  private <T extends ConfiguredNativeAspectFactory>
-    ListMultimap<Attribute, Dependency> dependentNodeMap(
-      String targetName, Class<T> aspect) throws Exception {
+  private ListMultimap<Attribute, Dependency> dependentNodeMap(
+      String targetName, NativeAspectClass aspect) throws Exception {
     Target target = packageManager.getTarget(reporter, Label.parseAbsolute(targetName));
     return dependencyResolver.dependentNodeMap(
         new TargetAndConfiguration(target, getTargetConfiguration()),
         getHostConfiguration(),
-        aspect != null ? new Aspect(new NativeAspectClass<T>(aspect)) : null,
+        aspect != null ? Aspect.forNative(aspect) : null,
         ImmutableSet.<ConfigMatchingProvider>of());
   }
 
@@ -117,7 +102,7 @@ public class DependencyResolverTest extends AnalysisTestCase {
       ListMultimap<Attribute, Dependency> dependentNodeMap,
       String attrName,
       String dep,
-      Aspect... aspects) {
+      AspectDescriptor... aspects) {
     Attribute attr = null;
     for (Attribute candidate : dependentNodeMap.keySet()) {
       if (candidate.getName().equals(attrName)) {
@@ -141,34 +126,36 @@ public class DependencyResolverTest extends AnalysisTestCase {
 
   @Test
   public void hasAspectsRequiredByRule() throws Exception {
-    setRules(new AspectRequiringRule(), new TestAspects.BaseRule());
+    setRulesAvailableInTests(new AspectRequiringRule(), new TestAspects.BaseRule());
     pkg("a",
         "aspect(name='a', foo=[':b'])",
         "aspect(name='b', foo=[])");
     ListMultimap<Attribute, Dependency> map = dependentNodeMap("//a:a", null);
     assertDep(
-        map, "foo", "//a:b", new Aspect(new NativeAspectClass(TestAspects.SimpleAspect.class)));
+        map, "foo", "//a:b",
+        new AspectDescriptor(TestAspects.SIMPLE_ASPECT));
   }
 
   @Test
   public void hasAspectsRequiredByAspect() throws Exception {
-    setRules(new TestAspects.BaseRule(), new TestAspects.SimpleRule());
+    setRulesAvailableInTests(new TestAspects.BaseRule(), new TestAspects.SimpleRule());
     pkg("a",
         "simple(name='a', foo=[':b'])",
         "simple(name='b', foo=[])");
     ListMultimap<Attribute, Dependency> map =
-        dependentNodeMap("//a:a", TestAspects.AttributeAspect.class);
+        dependentNodeMap("//a:a", TestAspects.ATTRIBUTE_ASPECT);
     assertDep(
-        map, "foo", "//a:b", new Aspect(new NativeAspectClass(TestAspects.AttributeAspect.class)));
+        map, "foo", "//a:b",
+        new AspectDescriptor(TestAspects.ATTRIBUTE_ASPECT));
   }
 
   @Test
   public void hasAspectDependencies() throws Exception {
-    setRules(new TestAspects.BaseRule());
+    setRulesAvailableInTests(new TestAspects.BaseRule());
     pkg("a", "base(name='a')");
     pkg("extra", "base(name='extra')");
     ListMultimap<Attribute, Dependency> map =
-        dependentNodeMap("//a:a", TestAspects.ExtraAttributeAspect.class);
+        dependentNodeMap("//a:a", TestAspects.EXTRA_ATTRIBUTE_ASPECT);
     assertDep(map, "$dep", "//extra:extra");
   }
 }

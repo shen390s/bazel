@@ -20,7 +20,6 @@ import com.google.common.base.Throwables;
 import com.google.common.base.Verify;
 import com.google.common.collect.ImmutableMap;
 import com.google.devtools.build.lib.actions.BuildFailedException;
-import com.google.devtools.build.lib.actions.ExecutorInitException;
 import com.google.devtools.build.lib.actions.TestExecException;
 import com.google.devtools.build.lib.analysis.AnalysisPhaseCompleteEvent;
 import com.google.devtools.build.lib.analysis.BuildInfoEvent;
@@ -139,10 +138,9 @@ public final class BuildTool {
    * @param validator target validator
    */
   public void buildTargets(BuildRequest request, BuildResult result, TargetValidator validator)
-      throws BuildFailedException, LocalEnvironmentException,
-             InterruptedException, ViewCreationFailedException,
-             TargetParsingException, LoadingFailedException, ExecutorInitException,
-             AbruptExitException, InvalidConfigurationException, TestExecException {
+      throws BuildFailedException, InterruptedException, ViewCreationFailedException,
+          TargetParsingException, LoadingFailedException, AbruptExitException,
+          InvalidConfigurationException, TestExecException {
     validateOptions(request);
     BuildOptions buildOptions = runtime.createBuildOptions(request);
     // Sync the package manager before sending the BuildStartingEvent in runLoadingPhase()
@@ -152,8 +150,9 @@ public final class BuildTool {
     ExecutionTool executionTool = null;
     LoadingResult loadingResult = null;
     BuildConfigurationCollection configurations = null;
+    boolean catastrophe = false;
     try {
-      env.getEventBus().post(new BuildStartingEvent(env.getOutputFileSystem(), request));
+      env.getEventBus().post(new BuildStartingEvent(env.determineOutputFileSystem(), request));
       LOG.info("Build identifier: " + request.getId());
       executionTool = new ExecutionTool(env, request);
       if (needsExecutionPhase(request.getBuildOptions())) {
@@ -177,9 +176,9 @@ public final class BuildTool {
               + "'test' right now!");
         }
       }
-      configurations = runtime.getSkyframeExecutor().createConfigurations(
+      configurations = env.getSkyframeExecutor().createConfigurations(
             env.getReporter(), runtime.getConfigurationFactory(), buildOptions,
-            runtime.getDirectories(), request.getMultiCpus(), request.getViewOptions().keepGoing);
+            request.getMultiCpus(), request.getViewOptions().keepGoing);
 
       env.getEventBus().post(new ConfigurationsCreatedEvent(configurations));
       env.throwPendingException();
@@ -205,7 +204,7 @@ public final class BuildTool {
 
       // Execution phase.
       if (needsExecutionPhase(request.getBuildOptions())) {
-        runtime.getSkyframeExecutor().injectTopLevelContext(request.getTopLevelArtifactContext());
+        env.getSkyframeExecutor().injectTopLevelContext(request.getTopLevelArtifactContext());
         executionTool.executeBuild(request.getId(), analysisResult, result,
             configurations, transformPackageRoots(analysisResult.getPackageRoots()));
       }
@@ -219,23 +218,32 @@ public final class BuildTool {
       // subclasses such as OutOfMemoryError.
       request.getOutErr().printErrLn("Unhandled exception thrown during build; message: " +
           e.getMessage());
+      catastrophe = true;
+      throw e;
+    } catch (Error e) {
+      catastrophe = true;
       throw e;
     } finally {
-      // Delete dirty nodes to ensure that they do not accumulate indefinitely.
-      long versionWindow = request.getViewOptions().versionWindowForDirtyNodeGc;
-      if (versionWindow != -1) {
-        runtime.getSkyframeExecutor().deleteOldNodes(versionWindow);
-      }
+      if (!catastrophe) {
+        // Delete dirty nodes to ensure that they do not accumulate indefinitely.
+        long versionWindow = request.getViewOptions().versionWindowForDirtyNodeGc;
+        if (versionWindow != -1) {
+          env.getSkyframeExecutor().deleteOldNodes(versionWindow);
+        }
 
-      if (executionTool != null) {
-        executionTool.shutdown();
+        if (executionTool != null) {
+          executionTool.shutdown();
+        }
+        // The workspace status actions will not run with certain flags, or if an error
+        // occurs early in the build. Tell a lie so that the event is not missing.
+        // If multiple build_info events are sent, only the first is kept, so this does not harm
+        // successful runs (which use the workspace status action).
+        env.getEventBus()
+            .post(
+                new BuildInfoEvent(
+                    env.getBlazeWorkspace().getWorkspaceStatusActionFactory()
+                        .createDummyWorkspaceStatus()));
       }
-      // The workspace status actions will not run with certain flags, or if an error
-      // occurs early in the build. Tell a lie so that the event is not missing.
-      // If multiple build_info events are sent, only the first is kept, so this does not harm
-      // successful runs (which use the workspace status action).
-      env.getEventBus().post(new BuildInfoEvent(
-          runtime.getworkspaceStatusActionFactory().createDummyWorkspaceStatus()));
     }
 
     if (loadingResult != null && loadingResult.hasTargetPatternError()) {
@@ -281,7 +289,7 @@ public final class BuildTool {
       SupportedEnvironmentsProvider provider =
           Verify.verifyNotNull(topLevelTarget.getProvider(SupportedEnvironmentsProvider.class));
         Collection<Label> missingEnvironments = ConstraintSemantics.getUnsupportedEnvironments(
-            provider.getEnvironments(), expectedEnvironments);
+            provider.getRefinedEnvironments(), expectedEnvironments);
         if (!missingEnvironments.isEmpty()) {
           throw new ViewCreationFailedException(
               String.format("This is a restricted-environment build. %s does not support"
@@ -329,6 +337,7 @@ public final class BuildTool {
   public BuildResult processRequest(BuildRequest request, TargetValidator validator) {
     BuildResult result = new BuildResult(request.getStartTime());
     env.getEventBus().register(result);
+    maybeSetStopOnFirstFailure(request, result);
     Throwable catastrophe = null;
     ExitCode exitCode = ExitCode.BLAZE_INTERNAL_ERROR;
     try {
@@ -373,6 +382,16 @@ public final class BuildTool {
     return result;
   }
 
+  private void maybeSetStopOnFirstFailure(BuildRequest request, BuildResult result) {
+    if (shouldStopOnFailure(request)) {
+      result.setStopOnFirstFailure(true);
+    }
+  }
+
+  private boolean shouldStopOnFailure(BuildRequest request) {
+    return !(request.getViewOptions().keepGoing && request.getExecutionOptions().testKeepGoing);
+  }
+
   @VisibleForTesting
   protected final LoadingResult runLoadingPhase(final BuildRequest request,
                                                 final TargetValidator validator)
@@ -395,11 +414,11 @@ public final class BuildTool {
 
       @Override
       public void notifyVisitedPackages(Set<PackageIdentifier> visitedPackages) {
-        runtime.getSkyframeExecutor().updateLoadedPackageSet(visitedPackages);
+        env.getSkyframeExecutor().updateLoadedPackageSet(visitedPackages);
       }
     };
 
-    LoadingPhaseRunner loadingPhaseRunner = runtime.getSkyframeExecutor().getLoadingPhaseRunner(
+    LoadingPhaseRunner loadingPhaseRunner = env.getSkyframeExecutor().getLoadingPhaseRunner(
         runtime.getPackageFactory().getRuleClassNames(),
         request.getLoadingOptions().useSkyframeTargetPatternEvaluator);
     LoadingResult result = loadingPhaseRunner.execute(getReporter(),
@@ -445,21 +464,21 @@ public final class BuildTool {
     getReporter().handle(Event.progress("Loading complete.  Analyzing..."));
     Profiler.instance().markPhase(ProfilePhase.ANALYZE);
 
+    BuildView view = new BuildView(env.getDirectories(), runtime.getRuleClassProvider(),
+        env.getSkyframeExecutor(), runtime.getCoverageReportActionFactory());
     AnalysisResult analysisResult =
-        env.getView()
-            .update(
-                loadingResult,
-                configurations,
-                request.getAspects(),
-                request.getViewOptions(),
-                request.getTopLevelArtifactContext(),
-                env.getReporter(),
-                env.getEventBus(),
-                isLoadingEnabled(request));
+        view.update(
+            loadingResult,
+            configurations,
+            request.getAspects(),
+            request.getViewOptions(),
+            request.getTopLevelArtifactContext(),
+            env.getReporter(),
+            env.getEventBus());
 
     // TODO(bazel-team): Merge these into one event.
     env.getEventBus().post(new AnalysisPhaseCompleteEvent(analysisResult.getTargetsToBuild(),
-        env.getView().getTargetsVisited(), timer.stop().elapsed(TimeUnit.MILLISECONDS)));
+        view.getTargetsVisited(), timer.stop().elapsed(TimeUnit.MILLISECONDS)));
     env.getEventBus().post(new TestFilteringCompleteEvent(analysisResult.getTargetsToBuild(),
         analysisResult.getTargetsToTest()));
 

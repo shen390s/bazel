@@ -72,7 +72,20 @@ public class OptionsParser implements OptionsProvider {
   private static final Map<ImmutableList<Class<? extends OptionsBase>>, OptionsData> optionsData =
       Maps.newHashMap();
 
-  private static synchronized OptionsData getOptionsData(
+  /**
+   * Returns {@link OpaqueOptionsData} suitable for passing along to
+   * {@link #newOptionsParser(OpaqueOptionsData optionsData)}.
+   *
+   * This is useful when you want to do the work of analyzing the given {@code optionsClasses}
+   * exactly once, but you want to parse lots of different lists of strings (and thus need to
+   * construct lots of different {@link OptionsParser} instances). 
+   */
+  public static OpaqueOptionsData getOptionsData(
+      ImmutableList<Class<? extends OptionsBase>> optionsClasses) {
+    return getOptionsDataInternal(optionsClasses);
+  }
+
+  private static synchronized OptionsData getOptionsDataInternal(
       ImmutableList<Class<? extends OptionsBase>> optionsClasses) {
     OptionsData result = optionsData.get(optionsClasses);
     if (result == null) {
@@ -87,7 +100,8 @@ public class OptionsParser implements OptionsProvider {
    * ones.
    */
   static Collection<Field> getAllAnnotatedFields(Class<? extends OptionsBase> optionsClass) {
-    OptionsData data = getOptionsData(ImmutableList.<Class<? extends OptionsBase>>of(optionsClass));
+    OptionsData data = getOptionsDataInternal(
+        ImmutableList.<Class<? extends OptionsBase>>of(optionsClass));
     return data.getFieldsForClass(optionsClass);
   }
 
@@ -110,8 +124,17 @@ public class OptionsParser implements OptionsProvider {
    * Create a new {@link OptionsParser}.
    */
   public static OptionsParser newOptionsParser(
-      Iterable<Class<? extends OptionsBase>> optionsClasses) {
-    return new OptionsParser(getOptionsData(ImmutableList.copyOf(optionsClasses)));
+      Iterable<? extends Class<? extends OptionsBase>> optionsClasses) {
+    return newOptionsParser(
+        getOptionsDataInternal(ImmutableList.<Class<? extends OptionsBase>>copyOf(optionsClasses)));
+  }
+
+  /**
+   * Create a new {@link OptionsParser}, using {@link OpaqueOptionsData} previously returned from
+   * {@link #getOptionsData}.
+   */
+  public static OptionsParser newOptionsParser(OpaqueOptionsData optionsData) {
+    return new OptionsParser((OptionsData) optionsData);
   }
 
   private final OptionsParserImpl impl;
@@ -154,19 +177,19 @@ public class OptionsParser implements OptionsProvider {
    * if "--help" appears anywhere within {@code args}.
    */
   public void parseAndExitUponError(OptionPriority priority, String source, String[] args) {
-    try {
-      parse(priority, source, Arrays.asList(args));
-    } catch (OptionsParsingException e) {
-      System.err.println("Error parsing command line: " + e.getMessage());
-      System.err.println("Try --help.");
-      System.exit(2);
-    }
     for (String arg : args) {
       if (arg.equals("--help")) {
         System.out.println(describeOptions(Collections.<String, String>emptyMap(),
                                            HelpVerbosity.LONG));
         System.exit(0);
       }
+    }
+    try {
+      parse(priority, source, Arrays.asList(args));
+    } catch (OptionsParsingException e) {
+      System.err.println("Error parsing command line: " + e.getMessage());
+      System.err.println("Try --help.");
+      System.exit(2);
     }
   }
 
@@ -570,7 +593,8 @@ public class OptionsParser implements OptionsProvider {
    * @return A map of an option name to the old value of the options that were cleared.
    * @throws IllegalArgumentException If the flag does not exist.
    */
-  public Map<String, OptionValueDescription> clearValue(String optionName) {
+  public Map<String, OptionValueDescription> clearValue(String optionName)
+      throws OptionsParsingException {
     Map<String, OptionValueDescription> clearedValues = Maps.newHashMap();
     impl.clearValue(optionName, clearedValues);
     return clearedValues;

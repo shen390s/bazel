@@ -34,6 +34,7 @@ import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.lib.vfs.UnixFileSystem;
 import com.google.devtools.build.lib.vfs.UnixFileSystem.SymlinkStrategy;
+import com.google.devtools.build.lib.vfs.WindowsFileSystem;
 
 import java.util.List;
 
@@ -112,14 +113,15 @@ public final class SymlinkTreeHelper {
       AbstractAction action,
       ActionExecutionContext actionExecutionContext,
       BinTools binTools,
-      PathFragment shExecutable)
+      PathFragment shExecutable,
+      ImmutableMap<String, String> shellEnvironment)
       throws ExecException, InterruptedException {
     List<String> args = getSpawnArgumentList(
         actionExecutionContext.getExecutor().getExecRoot(), binTools, shExecutable);
     try (ResourceHandle handle =
         ResourceManager.instance().acquireResources(action, RESOURCE_SET)) {
       actionExecutionContext.getExecutor().getSpawnActionContext(action.getMnemonic()).exec(
-          new BaseSpawn.Local(args, ImmutableMap.<String, String>of(), action),
+          new BaseSpawn.Local(args, shellEnvironment, action),
           actionExecutionContext);
     }
   }
@@ -148,8 +150,9 @@ public final class SymlinkTreeHelper {
     }
 
     FileSystem fs = execRoot.getFileSystem();
-    if (fs instanceof UnixFileSystem
-        && ((UnixFileSystem) fs).getSymlinkStrategy() == SymlinkStrategy.WINDOWS_COMPATIBLE) {
+    if ((fs instanceof WindowsFileSystem)
+        || (fs instanceof UnixFileSystem
+            && ((UnixFileSystem) fs).getSymlinkStrategy() == SymlinkStrategy.WINDOWS_COMPATIBLE)) {
       args.add("--windows_compatible");
     }
 

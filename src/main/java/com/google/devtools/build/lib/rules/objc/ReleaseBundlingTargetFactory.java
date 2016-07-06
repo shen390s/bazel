@@ -62,6 +62,7 @@ public abstract class ReleaseBundlingTargetFactory implements RuleConfiguredTarg
 
   @Override
   public ConfiguredTarget create(RuleContext ruleContext) throws InterruptedException {
+    validateAttributes(ruleContext);
     ObjcCommon common = common(ruleContext);
 
     XcodeProvider.Builder xcodeProviderBuilder = new XcodeProvider.Builder();
@@ -71,9 +72,9 @@ public abstract class ReleaseBundlingTargetFactory implements RuleConfiguredTarg
         ruleContext, common.getObjcProvider(), LinkedBinary.DEPENDENCIES_ONLY, bundleDirFormat,
         bundleName(ruleContext), bundleMinimumOsVersion(ruleContext));
     releaseBundlingSupport
-        .registerActions()
+        .registerActions(DsymOutputType.APP)
         .addXcodeSettings(xcodeProviderBuilder)
-        .addFilesToBuild(filesToBuild)
+        .addFilesToBuild(filesToBuild, DsymOutputType.APP)
         .validateResources()
         .validateAttributes();
 
@@ -106,6 +107,12 @@ public abstract class ReleaseBundlingTargetFactory implements RuleConfiguredTarg
     configureTarget(targetBuilder, ruleContext, releaseBundlingSupport);
     return targetBuilder.build();
   }
+
+  /**
+   * Validates application-related attributes set on this rule and registers any errors with the
+   * rule context. Default implemenation does nothing; subclasses may override it.
+   */
+  protected void validateAttributes(RuleContext ruleContext) {}
 
   /**
    * Returns the minimum OS version this bundle's plist and resources should be generated for

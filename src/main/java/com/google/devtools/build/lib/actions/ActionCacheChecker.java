@@ -16,7 +16,7 @@ package com.google.devtools.build.lib.actions;
 import com.google.common.base.Predicate;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
-import com.google.devtools.build.lib.actions.Action.MiddlemanType;
+import com.google.devtools.build.lib.actions.ActionAnalysisMetadata.MiddlemanType;
 import com.google.devtools.build.lib.actions.cache.ActionCache;
 import com.google.devtools.build.lib.actions.cache.ActionCache.Entry;
 import com.google.devtools.build.lib.actions.cache.Digest;
@@ -327,7 +327,7 @@ public class ActionCacheChecker {
   private static void reportRebuild(@Nullable EventHandler handler, Action action, String message) {
     // For MiddlemanAction, do not report rebuild.
     if (handler != null && !action.getActionType().isMiddleman()) {
-      handler.handle(new Event(
+      handler.handle(Event.of(
           EventKind.DEPCHECKER, null, "Executing " + action.prettyPrint() + ": " + message + "."));
     }
   }

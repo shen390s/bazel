@@ -20,7 +20,6 @@ import static org.junit.Assert.assertNotSame;
 import com.google.common.base.Function;
 import com.google.common.base.Predicate;
 import com.google.common.collect.Collections2;
-import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
@@ -33,13 +32,13 @@ import com.google.devtools.build.lib.events.EventCollector;
 import com.google.devtools.build.lib.events.EventKind;
 import com.google.devtools.build.lib.packages.ConstantRuleVisibility;
 import com.google.devtools.build.lib.packages.NoSuchThingException;
-import com.google.devtools.build.lib.packages.Package;
-import com.google.devtools.build.lib.packages.PackageFactory;
+import com.google.devtools.build.lib.packages.Preprocessor;
 import com.google.devtools.build.lib.packages.Target;
 import com.google.devtools.build.lib.packages.util.PackageLoadingTestCase;
 import com.google.devtools.build.lib.packages.util.PreprocessorUtils;
 import com.google.devtools.build.lib.pkgcache.TransitivePackageLoader;
 import com.google.devtools.build.lib.testutil.ManualClock;
+import com.google.devtools.build.lib.testutil.TestConstants;
 import com.google.devtools.build.lib.vfs.FileStatus;
 import com.google.devtools.build.lib.vfs.FileSystem;
 import com.google.devtools.build.lib.vfs.ModifiedFileSet;
@@ -72,7 +71,10 @@ abstract public class SkyframeLabelVisitorTestCase extends PackageLoadingTestCas
   protected PreprocessorUtils.MutableFactorySupplier preprocessorFactorySupplier =
       new PreprocessorUtils.MutableFactorySupplier(null);
 
-  abstract public PackageFactory.EnvironmentExtension getPackageEnvironmentExtension();
+  @Override
+  protected Preprocessor.Factory.Supplier getPreprocessorFactorySupplier() {
+    return preprocessorFactorySupplier;
+  }
 
   @Override
   protected FileSystem createFileSystem() {
@@ -121,8 +123,7 @@ abstract public class SkyframeLabelVisitorTestCase extends PackageLoadingTestCas
    * Check that the expected targets were exactly those visited, and that the packages of these
    * expected targets were exactly those packages visited.
    */
-  protected void assertExpectedTargets(
-      Set<String> expectedLabels, boolean expectError, Set<Target> startingTargets)
+  protected void assertExpectedTargets(Set<String> expectedLabels, Set<Target> startingTargets)
       throws Exception {
     Set<Label> visitedLabels =
         getVisitedLabels(
@@ -143,13 +144,6 @@ abstract public class SkyframeLabelVisitorTestCase extends PackageLoadingTestCas
     }
 
     assertEquals(expectedPkgs, getVisitedPackageNames(startingTargets));
-    if (!expectError) {
-      Set<PathFragment> visitedPkgs = new HashSet<>();
-      for (Package pkg : getErrorFreeVisitedPackages(startingTargets)) {
-        visitedPkgs.add(pkg.getNameFragment());
-      }
-      assertEquals(expectedPkgs, visitedPkgs);
-    }
   }
 
   /**
@@ -176,7 +170,7 @@ abstract public class SkyframeLabelVisitorTestCase extends PackageLoadingTestCas
             reporter, startingTargets, ImmutableSet.<Label>of(), keepGoing, 200, Integer.MAX_VALUE);
 
     assertNotSame(expectError, result);
-    assertExpectedTargets(expectedLabels, expectError, startingTargets);
+    assertExpectedTargets(expectedLabels, startingTargets);
   }
 
   /**
@@ -286,20 +280,11 @@ abstract public class SkyframeLabelVisitorTestCase extends PackageLoadingTestCas
     return builder.build();
   }
 
-  protected Set<Package> getErrorFreeVisitedPackages(Set<Target> startingTargets) {
-    ImmutableSet.Builder<Package> builder = ImmutableSet.builder();
-    builder.addAll(visitor.getErrorFreeVisitedPackages(reporter));
-    for (Target target : startingTargets) {
-      builder.add(target.getPackage());
-    }
-    return builder.build();
-  }
-
   @Before
   public final void initializeVisitor() throws Exception {
-    skyframeExecutor = super.createSkyframeExecutor(
-        ImmutableList.of(getPackageEnvironmentExtension()), preprocessorFactorySupplier,
-        ConstantRuleVisibility.PRIVATE, ruleClassProvider.getDefaultsPackageContent());
+    setUpSkyframe(
+        ConstantRuleVisibility.PRIVATE,
+        ruleClassProvider.getDefaultsPackageContent(TestConstants.TEST_INVOCATION_POLICY));
     this.visitor = skyframeExecutor.pkgLoader();
   }
 

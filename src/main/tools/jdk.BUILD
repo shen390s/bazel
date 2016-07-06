@@ -75,7 +75,13 @@ filegroup(
 
 filegroup(
     name = "jre-bin",
-    srcs = glob(["jre/bin/**"]),
+    srcs = select({
+        # In some configurations, Java browser plugin is considered harmful and
+        # common antivirus software blocks access to npjp2.dll interfering with Bazel,
+        # so do not include it in JRE on Windows.
+        ":windows" : glob(["jre/bin/**"], exclude = ["jre/bin/plugin2/**"]),
+        "//conditions:default" : glob(["jre/bin/**"])
+    }),
 )
 
 filegroup(
@@ -93,7 +99,11 @@ filegroup(
 
 filegroup(
     name = "jdk-bin",
-    srcs = glob(["bin/**"]),
+    srcs = glob(
+        ["bin/**"],
+        # The JDK on Windows sometimes contains a directory called
+        # "%systemroot%", which is not a valid label.
+        exclude = ["**/*%*/**"]),
 )
 
 filegroup(
@@ -105,7 +115,7 @@ filegroup(
     name = "jdk-lib",
     srcs = glob(
         ["lib/**"],
-        exclude= [
+        exclude = [
             "lib/missioncontrol/**",
             "lib/visualvm/**",
         ]),

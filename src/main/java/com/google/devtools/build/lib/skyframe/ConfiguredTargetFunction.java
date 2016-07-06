@@ -23,16 +23,17 @@ import com.google.common.collect.LinkedListMultimap;
 import com.google.common.collect.ListMultimap;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Multimap;
-import com.google.devtools.build.lib.actions.Action;
+import com.google.devtools.build.lib.actions.ActionAnalysisMetadata;
 import com.google.devtools.build.lib.actions.Actions;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.MutableActionGraph.ActionConflictException;
+import com.google.devtools.build.lib.analysis.AspectDescriptor;
 import com.google.devtools.build.lib.analysis.CachingAnalysisEnvironment;
 import com.google.devtools.build.lib.analysis.ConfiguredAspect;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
 import com.google.devtools.build.lib.analysis.Dependency;
 import com.google.devtools.build.lib.analysis.LabelAndConfiguration;
-import com.google.devtools.build.lib.analysis.RuleConfiguredTarget;
+import com.google.devtools.build.lib.analysis.MergedConfiguredTarget;
 import com.google.devtools.build.lib.analysis.TargetAndConfiguration;
 import com.google.devtools.build.lib.analysis.TransitiveInfoProvider;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
@@ -49,7 +50,9 @@ import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.events.StoredEventHandler;
 import com.google.devtools.build.lib.packages.Aspect;
+import com.google.devtools.build.lib.packages.AspectClass;
 import com.google.devtools.build.lib.packages.AspectDefinition;
+import com.google.devtools.build.lib.packages.AspectParameters;
 import com.google.devtools.build.lib.packages.Attribute;
 import com.google.devtools.build.lib.packages.BuildFileContainsErrorsException;
 import com.google.devtools.build.lib.packages.BuildType;
@@ -77,6 +80,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
+import java.util.Map.Entry;
 import java.util.Objects;
 import java.util.Set;
 
@@ -575,7 +579,7 @@ final class ConfiguredTargetFunction implements SkyFunction {
       SkyKey depKey = TO_KEYS.apply(dep);
       ConfiguredTarget depConfiguredTarget = depConfiguredTargetMap.get(depKey);
       result.put(entry.getKey(),
-          RuleConfiguredTarget.mergeAspects(depConfiguredTarget, depAspectMap.get(depKey)));
+          MergedConfiguredTarget.of(depConfiguredTarget, depAspectMap.get(depKey)));
     }
 
     return result;
@@ -597,8 +601,11 @@ final class ConfiguredTargetFunction implements SkyFunction {
     ListMultimap<SkyKey, ConfiguredAspect> result = ArrayListMultimap.create();
     Set<SkyKey> aspectKeys = new HashSet<>();
     for (Dependency dep : deps) {
-      for (Aspect depAspect : dep.getAspects()) {
-        aspectKeys.add(createAspectKey(dep.getLabel(), dep.getConfiguration(), depAspect));
+      for (Entry<AspectDescriptor, BuildConfiguration> depAspect
+          : dep.getAspectConfigurations().entrySet()) {
+        aspectKeys.add(createAspectKey(
+            dep.getLabel(), depAspect.getValue(), dep.getConfiguration(),
+            depAspect.getKey().getAspectClass(), depAspect.getKey().getParameters()));
       }
     }
 
@@ -613,12 +620,12 @@ final class ConfiguredTargetFunction implements SkyFunction {
         continue;
       }
       ConfiguredTarget depConfiguredTarget = configuredTargetMap.get(depKey);
-      for (Aspect depAspect : dep.getAspects()) {
-        if (!aspectMatchesConfiguredTarget(depConfiguredTarget, depAspect)) {
-          continue;
-        }
-
-        SkyKey aspectKey = createAspectKey(dep.getLabel(), dep.getConfiguration(), depAspect);
+      for (Entry<AspectDescriptor, BuildConfiguration> depAspect
+          : dep.getAspectConfigurations().entrySet()) {
+        SkyKey aspectKey = createAspectKey(
+            dep.getLabel(), depAspect.getValue(), dep.getConfiguration(),
+            depAspect.getKey().getAspectClass(),
+            depAspect.getKey().getParameters());
         AspectValue aspectValue = null;
         try {
           // TODO(ulfjack): Catch all thrown AspectCreationException and NoSuchThingException
@@ -628,7 +635,7 @@ final class ConfiguredTargetFunction implements SkyFunction {
           throw new AspectCreationException(
               String.format(
                   "Evaluation of aspect %s on %s failed: %s",
-                  depAspect.getDefinition().getName(),
+                  depAspect.getKey().getAspectClass().getName(),
                   dep.getLabel(),
                   e.toString()));
         }
@@ -637,6 +644,10 @@ final class ConfiguredTargetFunction implements SkyFunction {
           // Dependent aspect has either not been computed yet or is in error.
           return null;
         }
+        if (!aspectMatchesConfiguredTarget(depConfiguredTarget, aspectValue.getAspect())) {
+          continue;
+        }
+
         result.put(depKey, aspectValue.getConfiguredAspect());
         transitivePackages.addTransitive(aspectValue.getTransitivePackages());
       }
@@ -645,15 +656,20 @@ final class ConfiguredTargetFunction implements SkyFunction {
   }
 
   public static SkyKey createAspectKey(
-      Label label, BuildConfiguration buildConfiguration, Aspect depAspect) {
+      Label label,
+      BuildConfiguration aspectConfiguration,
+      BuildConfiguration baseConfiguration,
+      AspectClass aspectClass,
+      AspectParameters parameters) {
     return AspectValue.key(label,
-        buildConfiguration,
-        depAspect.getAspectClass(),
-        depAspect.getParameters());
+        aspectConfiguration,
+        baseConfiguration,
+        aspectClass,
+        parameters);
   }
 
-  private static boolean aspectMatchesConfiguredTarget(ConfiguredTarget dep, Aspect aspectClass) {
-    AspectDefinition aspectDefinition = aspectClass.getDefinition();
+  private static boolean aspectMatchesConfiguredTarget(ConfiguredTarget dep, Aspect aspect) {
+    AspectDefinition aspectDefinition = aspect.getDefinition();
     for (Class<?> provider : aspectDefinition.getRequiredProviders()) {
       if (dep.getProvider(provider.asSubclass(TransitiveInfoProvider.class)) == null) {
         return false;
@@ -830,31 +846,17 @@ final class ConfiguredTargetFunction implements SkyFunction {
     analysisEnvironment.disable(target);
     Preconditions.checkNotNull(configuredTarget, target);
 
-    Map<Artifact, Action> generatingActions;
+    Map<Artifact, ActionAnalysisMetadata> generatingActions;
     // Check for conflicting actions within this configured target (that indicates a bug in the
     // rule implementation).
     try {
-      generatingActions = filterSharedActionsAndThrowIfConflict(analysisEnvironment.getRegisteredActions());
+      generatingActions = Actions.filterSharedActionsAndThrowActionConflict(
+          analysisEnvironment.getRegisteredActions());
     } catch (ActionConflictException e) {
       throw new ConfiguredTargetFunctionException(e);
     }
     return new ConfiguredTargetValue(
         configuredTarget, generatingActions, transitivePackages.build());
-  }
-
-  static Map<Artifact, Action> filterSharedActionsAndThrowIfConflict(Iterable<Action> actions)
-      throws ActionConflictException {
-    Map<Artifact, Action> generatingActions = new HashMap<>();
-    for (Action action : actions) {
-      for (Artifact artifact : action.getOutputs()) {
-        Action previousAction = generatingActions.put(artifact, action);
-        if (previousAction != null && previousAction != action
-            && !Actions.canBeShared(previousAction, action)) {
-          throw new ActionConflictException(artifact, previousAction, action);
-        }
-      }
-    }
-    return generatingActions;
   }
 
   /**

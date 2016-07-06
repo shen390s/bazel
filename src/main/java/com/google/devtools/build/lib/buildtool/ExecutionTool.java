@@ -19,8 +19,10 @@ import com.google.common.base.Stopwatch;
 import com.google.common.collect.HashBasedTable;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableMultimap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
+import com.google.common.collect.Multimap;
 import com.google.common.collect.Ordering;
 import com.google.common.collect.Table;
 import com.google.devtools.build.lib.Constants;
@@ -32,6 +34,7 @@ import com.google.devtools.build.lib.actions.ActionContextProvider;
 import com.google.devtools.build.lib.actions.ActionGraph;
 import com.google.devtools.build.lib.actions.ActionInputFileCache;
 import com.google.devtools.build.lib.actions.Artifact;
+import com.google.devtools.build.lib.actions.ArtifactFactory;
 import com.google.devtools.build.lib.actions.BlazeExecutor;
 import com.google.devtools.build.lib.actions.BuildFailedException;
 import com.google.devtools.build.lib.actions.ExecException;
@@ -187,9 +190,10 @@ public class ExecutionTool {
         getActionContextProvidersFromModules(
             runtime,
             new FilesetActionContextImpl.Provider(
-                env.getReporter(), runtime.getWorkspaceName()),
+                env.getReporter(), env.getWorkspaceName()),
             new SimpleActionContextProvider(
-                new SymlinkTreeStrategy(env.getOutputService(), runtime.getBinTools())));
+                new SymlinkTreeStrategy(
+                    env.getOutputService(), env.getBlazeWorkspace().getBinTools())));
     StrategyConverter strategyConverter = new StrategyConverter(actionContextProviders);
 
     ImmutableList<ActionContextConsumer> actionContextConsumers =
@@ -205,8 +209,8 @@ public class ExecutionTool {
               }
 
               @Override
-              public Map<Class<? extends ActionContext>, String> getActionContexts() {
-                return ImmutableMap.<Class<? extends ActionContext>, String>builder()
+              public Multimap<Class<? extends ActionContext>, String> getActionContexts() {
+                return ImmutableMultimap.<Class<? extends ActionContext>, String>builder()
                     .put(FilesetActionContext.class, "")
                     .put(WorkspaceStatusAction.Context.class, "")
                     .put(SymlinkTreeActionContext.class, "")
@@ -232,7 +236,7 @@ public class ExecutionTool {
       }
 
       for (Map.Entry<Class<? extends ActionContext>, String> entry :
-          consumer.getActionContexts().entrySet()) {
+          consumer.getActionContexts().entries()) {
         ActionContext context = strategyConverter.getStrategy(entry.getKey(), entry.getValue());
         if (context == null) {
           throw makeExceptionForInvalidStrategyValue(
@@ -297,8 +301,8 @@ public class ExecutionTool {
   private BlazeExecutor createExecutor()
       throws ExecutorInitException {
     return new BlazeExecutor(
-        runtime.getDirectories().getExecRoot(),
-        runtime.getDirectories().getOutputPath(),
+        env.getExecRoot(),
+        env.getOutputPath(),
         getReporter(),
         env.getEventBus(),
         runtime.getClock(),
@@ -357,8 +361,8 @@ public class ExecutionTool {
         ? targetConfigurations.get(0) : null;
     if (targetConfigurations.size() == 1) {
       OutputDirectoryLinksUtils.createOutputDirectoryLinks(
-          runtime.getWorkspaceName(), getWorkspace(), getExecRoot(),
-          runtime.getOutputPath(), getReporter(), targetConfiguration,
+          env.getWorkspaceName(), env.getWorkspace(), getExecRoot(),
+          env.getOutputPath(), getReporter(), targetConfiguration,
           request.getBuildOptions().getSymlinkPrefix());
     }
 
@@ -416,7 +420,7 @@ public class ExecutionTool {
         // Free memory by removing cache entries that aren't going to be needed. Note that in
         // skyframe full, this destroys the action graph as well, so we can only do it after the
         // action graph is no longer needed.
-        env.getView().clearAnalysisCache(analysisResult.getTargetsToBuild());
+        env.getSkyframeBuildView().clearAnalysisCache(analysisResult.getTargetsToBuild());
         actionGraph = null;
       }
 
@@ -434,7 +438,7 @@ public class ExecutionTool {
           executor,
           builtTargets,
           request.getBuildOptions().explanationPath != null,
-          runtime.getLastExecutionTimeRange());
+          env.getBlazeWorkspace().getLastExecutionTimeRange());
       buildCompleted = true;
     } catch (BuildFailedException | TestExecException e) {
       buildCompleted = true;
@@ -506,7 +510,7 @@ public class ExecutionTool {
 
   private void createToolsSymlinks() throws ExecutorInitException {
     try {
-      runtime.getBinTools().setupBuildTools();
+      env.getBlazeWorkspace().getBinTools().setupBuildTools();
     } catch (ExecException e) {
       throw new ExecutorInitException("Tools symlink creation failed", e);
     }
@@ -517,10 +521,6 @@ public class ExecutionTool {
     try {
       FileSystemUtils.deleteTreesBelowNotPrefixed(getExecRoot(),
           new String[] { ".", "_", Constants.PRODUCT_NAME + "-"});
-      // Delete the build configuration's temporary directories
-      for (BuildConfiguration configuration : configurations.getTargetConfigurations()) {
-        configuration.prepareForExecutionPhase();
-      }
       FileSystemUtils.plantLinkForest(packageRoots, getExecRoot());
     } catch (IOException e) {
       throw new ExecutorInitException("Source forest creation failed", e);
@@ -528,7 +528,7 @@ public class ExecutionTool {
   }
 
   private void createActionLogDirectory() throws ExecutorInitException {
-    Path directory = runtime.getDirectories().getActionConsoleOutputDirectory();
+    Path directory = env.getDirectories().getActionConsoleOutputDirectory();
     try {
       if (directory.exists()) {
         FileSystemUtils.deleteTree(directory);
@@ -544,8 +544,8 @@ public class ExecutionTool {
    */
   private void startLocalOutputBuild() throws ExecutorInitException {
     try (AutoProfiler p = AutoProfiler.profiled("Starting local output build", ProfilerTask.INFO)) {
-      Path outputPath = runtime.getOutputPath();
-      Path localOutputPath = runtime.getDirectories().getLocalOutputPath();
+      Path outputPath = env.getOutputPath();
+      Path localOutputPath = env.getDirectories().getLocalOutputPath();
 
       if (outputPath.isSymbolicLink()) {
         try {
@@ -668,7 +668,7 @@ public class ExecutionTool {
     boolean verboseExplanations = options.verboseExplanations;
     boolean keepGoing = request.getViewOptions().keepGoing;
 
-    Path actionOutputRoot = runtime.getDirectories().getActionConsoleOutputDirectory();
+    Path actionOutputRoot = env.getDirectories().getActionConsoleOutputDirectory();
     Predicate<Action> executionFilter = CheckUpToDateFilter.fromOptions(
         request.getOptions(ExecutionOptions.class));
 
@@ -680,11 +680,12 @@ public class ExecutionTool {
     // client.
     fileCache = createBuildSingleFileCache(executor.getExecRoot());
     skyframeExecutor.setActionOutputRoot(actionOutputRoot);
+    ArtifactFactory artifactFactory = env.getSkyframeBuildView().getArtifactFactory();
     return new SkyframeBuilder(skyframeExecutor,
-        new ActionCacheChecker(actionCache, env.getView().getArtifactFactory(), executionFilter,
-            verboseExplanations),
+        new ActionCacheChecker(actionCache, artifactFactory, executionFilter, verboseExplanations),
         keepGoing, actualJobs,
-        options.checkOutputFiles ? modifiedOutputFiles : ModifiedFileSet.NOTHING_MODIFIED,
+        request.getPackageCacheOptions().checkOutputFiles
+            ? modifiedOutputFiles : ModifiedFileSet.NOTHING_MODIFIED,
         options.finalizeActions, fileCache, request.getBuildOptions().progressReportInterval);
   }
 
@@ -731,7 +732,7 @@ public class ExecutionTool {
 
   private ActionInputFileCache createBuildSingleFileCache(Path execRoot) {
     String cwd = execRoot.getPathString();
-    FileSystem fs = runtime.getDirectories().getFileSystem();
+    FileSystem fs = env.getDirectories().getFileSystem();
 
     ActionInputFileCache cache = null;
     for (BlazeModule module : runtime.getBlazeModules()) {
@@ -753,10 +754,10 @@ public class ExecutionTool {
   }
 
   private Path getWorkspace() {
-    return runtime.getWorkspace();
+    return env.getWorkspace();
   }
 
   private Path getExecRoot() {
-    return runtime.getExecRoot();
+    return env.getExecRoot();
   }
 }

@@ -27,10 +27,13 @@ filegroup(
     name = "srcs",
     srcs = glob(["**"]) + [
         "//src/main/java/com/google/devtools/build/docgen:srcs",
+        "//src/main/java/com/google/devtools/build/lib/actions:srcs",
         "//src/main/java/com/google/devtools/build/lib/bazel/dash:srcs",
+        "//src/main/java/com/google/devtools/build/lib/bazel/repository/downloader:srcs",
         "//src/main/java/com/google/devtools/build/lib/query2:srcs",
         "//src/main/java/com/google/devtools/build/lib/remote:srcs",
         "//src/main/java/com/google/devtools/build/lib/rules/apple:srcs",
+        "//src/main/java/com/google/devtools/build/lib/rules/apple/cpp:srcs",
         "//src/main/java/com/google/devtools/build/lib/rules/cpp:srcs",
         "//src/main/java/com/google/devtools/build/lib/rules/genquery:srcs",
         "//src/main/java/com/google/devtools/build/lib/rules/objc:srcs",
@@ -40,7 +43,10 @@ filegroup(
         "//src/main/java/com/google/devtools/build/skyframe:srcs",
         "//src/main/java/com/google/devtools/common/options:srcs",
     ],
-    visibility = ["//src/test/shell/bazel:__pkg__"],
+    visibility = [
+        "//src:__pkg__",
+        "//src/test/shell/bazel:__pkg__",
+    ],
 )
 
 # This package provides a general-purpose directed graph utility class with
@@ -95,6 +101,22 @@ java_library(
         ":common",
         ":preconditions",
         "//third_party:jsr305",
+    ],
+)
+
+java_library(
+    name = "flags",
+    srcs = glob([
+        "flags/*.java",
+    ]),
+    deps = [
+        ":io",
+        ":preconditions",
+        "//src/main/java/com/google/devtools/common/options",
+        "//src/main/protobuf:invocation_policy_java_proto",
+        "//third_party:guava",
+        "//third_party:jsr305",
+        "//third_party/protobuf",
     ],
 )
 
@@ -383,13 +405,14 @@ java_library(
         ":events",
         ":skylarkinterface",
         ":syntax",
+        ":transitive-info-provider",
         ":util",
         ":vfs",
         "//src/main/java/com/google/devtools/common/options",
-        "//src/main/protobuf:build_proto_v2",
+        "//src/main/protobuf:build_java_proto",
         "//third_party:guava",
         "//third_party:jsr305",
-        "//third_party:protobuf",
+        "//third_party/protobuf",
     ],
 )
 
@@ -409,10 +432,26 @@ java_library(
     ],
     deps = [
         ":concurrent",
-        "//src/main/protobuf:build_proto_v2",
+        ":preconditions",
+        ":shell",
+        "//src/main/protobuf:build_java_proto",
         "//third_party:guava",
-        "//third_party:protobuf",
+        "//third_party:jsr305",
+        "//third_party/protobuf",
     ],
+)
+
+java_library(
+    name = "execution-requirements",
+    srcs = ["analysis/actions/ExecutionRequirements.java"],
+    visibility = [
+        "//src/main/java/com/google/devtools/build/lib/rules:__subpackages__",
+    ],
+)
+
+java_library(
+    name = "transitive-info-provider",
+    srcs = ["analysis/TransitiveInfoProvider.java"],
 )
 
 java_library(
@@ -433,9 +472,15 @@ java_library(
             "rules/repository/*.java",
             "skyframe/*.java",
         ],
-        exclude = ["analysis/BuildInfo.java"],
+        exclude = [
+            "analysis/BuildInfo.java",
+            "analysis/TransitiveInfoProvider.java",
+        ],
     ) + [
         "runtime/BlazeServerStartupOptions.java",
+    ],
+    exports = [
+        ":transitive-info-provider",
     ],
     deps = [
         ":base-util",
@@ -445,22 +490,26 @@ java_library(
         ":concurrent",
         ":events",
         ":exitcode-external",
+        ":flags",
         ":graph",
         ":io",
         ":os_util",
         ":packages-internal",
         ":shell",
         ":skylarkinterface",
+        ":transitive-info-provider",
         ":util",
         ":vfs",
         "//src/main/java/com/google/devtools/build/lib/actions",
         "//src/main/java/com/google/devtools/build/skyframe",
         "//src/main/java/com/google/devtools/common/options",
-        "//src/main/protobuf:extra_actions_base_proto",
-        "//src/main/protobuf:test_status_proto",
+        "//src/main/protobuf:extra_actions_base_java_proto",
+        "//src/main/protobuf:invocation_policy_java_proto",
+        "//src/main/protobuf:test_status_java_proto",
+        "//third_party:auto_value",
         "//third_party:guava",
         "//third_party:jsr305",
-        "//third_party:protobuf",
+        "//third_party/protobuf",
     ],
 )
 
@@ -495,18 +544,18 @@ java_library(
         ":packages-internal",
         ":proto-rules",
         ":python-rules",
-        ":skylarkinterface",
         ":util",
         ":vfs",
         "//src/main/java/com/google/devtools/build/lib/actions",
         "//src/main/java/com/google/devtools/build/lib/query2:query-output",
         "//src/main/java/com/google/devtools/build/lib/rules/apple",
+        "//src/main/java/com/google/devtools/build/lib/rules/apple/cpp",
         "//src/main/java/com/google/devtools/build/lib/rules/cpp",
         "//src/main/java/com/google/devtools/build/lib/rules/genquery",
         "//src/main/java/com/google/devtools/build/lib/rules/objc",
         "//src/main/java/com/google/devtools/build/skyframe",
         "//src/main/java/com/google/devtools/common/options",
-        "//src/main/protobuf:crosstool_config_proto",
+        "//src/main/protobuf:crosstool_config_java_proto",
         "//third_party:guava",
         "//third_party:joda_time",
         "//third_party:jsr305",
@@ -570,7 +619,7 @@ java_library(
     name = "bazel-repository",
     srcs = glob(
         [
-            "bazel/repository/*.java",
+            "bazel/repository/**/*.java",
             "bazel/rules/workspace/*.java",
         ],
         exclude = ["bazel/repository/MavenConnector.java"],
@@ -592,11 +641,15 @@ java_library(
         ":concurrent",
         ":events",
         ":maven-connector",
+        ":runtime",
         ":util",
         "//src/java_tools/singlejar/java/com/google/devtools/build/zip",
         "//src/main/java/com/google/devtools/build/lib:build-base",
         "//src/main/java/com/google/devtools/build/lib:packages-internal",
+        "//src/main/java/com/google/devtools/build/lib:shell",
+        "//src/main/java/com/google/devtools/build/lib:skylarkinterface",
         "//src/main/java/com/google/devtools/build/lib:vfs",
+        "//src/main/java/com/google/devtools/build/lib/bazel/repository/downloader",
         "//src/main/java/com/google/devtools/build/skyframe",
         "//third_party:aether",
         "//third_party:apache_commons_compress",
@@ -636,7 +689,7 @@ java_library(
         "//src/main/java/com/google/devtools/build/lib/actions",
         "//src/main/java/com/google/devtools/build/lib/rules/cpp",
         "//third_party:jsr305",
-        "//third_party:protobuf",
+        "//third_party/protobuf",
     ],
 )
 
@@ -659,7 +712,7 @@ java_library(
         "//third_party:auto_value",
         "//third_party:guava",
         "//third_party:jsr305",
-        "//third_party:protobuf",
+        "//third_party/protobuf",
     ],
 )
 
@@ -687,10 +740,10 @@ java_library(
         "//src/main/java/com/google/devtools/build/lib/actions",
         "//src/main/java/com/google/devtools/build/lib/rules/cpp",
         "//src/main/java/com/google/devtools/common/options",
-        "//src/main/protobuf:extra_actions_base_proto",
+        "//src/main/protobuf:extra_actions_base_java_proto",
         "//third_party:joda_time",
         "//third_party:jsr305",
-        "//third_party:protobuf",
+        "//third_party/protobuf",
     ],
 )
 
@@ -715,11 +768,15 @@ java_library(
         ":packages-internal",
         ":util",
         ":vfs",
+        "//src/main/java/com/google/devtools/build/lib:skylarkinterface",
         "//src/main/java/com/google/devtools/build/lib/actions",
         "//src/main/java/com/google/devtools/build/lib/rules/cpp",
         "//src/main/java/com/google/devtools/common/options",
+        "//src/main/protobuf:android_deploy_info_java_proto",
+        "//src/main/protobuf:apk_manifest_java_proto",
+        "//third_party:android_sdklib",
         "//third_party:jsr305",
-        "//third_party:protobuf",
+        "//third_party/protobuf",
     ],
 )
 
@@ -740,10 +797,10 @@ java_library(
         "//src/main/java/com/google/devtools/build/lib/actions",
         "//src/main/java/com/google/devtools/build/lib/rules/cpp",
         "//src/main/java/com/google/devtools/common/options",
-        "//src/main/protobuf:crosstool_config_proto",
-        "//src/main/protobuf:extra_actions_base_proto",
+        "//src/main/protobuf:crosstool_config_java_proto",
+        "//src/main/protobuf:extra_actions_base_java_proto",
         "//third_party:jsr305",
-        "//third_party:protobuf",
+        "//third_party/protobuf",
     ],
 )
 
@@ -763,10 +820,11 @@ java_library(
         ":util",
         ":vfs",
         "//src/main/java/com/google/devtools/build/lib/actions",
-        "//src/main/protobuf:android_studio_ide_info_proto",
+        "//src/main/java/com/google/devtools/build/lib/rules/cpp",
+        "//src/main/protobuf:android_studio_ide_info_java_proto",
         "//third_party:guava",
         "//third_party:jsr305",
-        "//third_party:protobuf",
+        "//third_party/protobuf",
     ],
 )
 
@@ -801,6 +859,7 @@ java_library(
         ":concurrent",
         ":events",
         ":exitcode-external",
+        ":flags",
         ":io",
         ":packages-internal",
         ":profiler-output",
@@ -816,12 +875,14 @@ java_library(
         "//src/main/java/com/google/devtools/build/lib/query2:query-output",
         "//src/main/java/com/google/devtools/build/skyframe",
         "//src/main/java/com/google/devtools/common/options",
-        "//src/main/protobuf:build_proto_v2",
-        "//src/main/protobuf:invocation_policy_proto",
-        "//src/main/protobuf:test_status_proto",
+        "//src/main/protobuf:build_java_proto",
+        "//src/main/protobuf:command_server_java_proto",
+        "//src/main/protobuf:invocation_policy_java_proto",
+        "//src/main/protobuf:test_status_java_proto",
         "//third_party:joda_time",
         "//third_party:jsr305",
-        "//third_party:protobuf",
+        "//third_party/grpc:grpc-jar",
+        "//third_party/protobuf",
     ],
 )
 
@@ -877,7 +938,7 @@ java_library(
         ":vfs",
         "//src/main/java/com/google/devtools/build/lib/query2",
         "//src/main/java/com/google/devtools/common/options",
-        "//src/main/protobuf:build_proto_v2",
+        "//src/main/protobuf:build_java_proto",
     ],
 )
 
@@ -914,25 +975,40 @@ genrule(
         "//src/main/java/com/google/devtools/build/docgen:docgen_bin",
         "//src/main/java/com/google/devtools/build/docgen:docgen_javalib",
     ],
+    visibility = [
+        "//site:__pkg__",
+        "//src/test/shell/bazel:__pkg__",
+    ],
 )
+
+# The skylark repository classes are passed as parameter of the Skylark documentation generator.
+SKYLARK_REPOSITORY_CLASSES = [
+    "com.google.devtools.build.lib.bazel.repository.skylark.SkylarkExecutionResult",
+    "com.google.devtools.build.lib.bazel.repository.skylark.SkylarkOS",
+    "com.google.devtools.build.lib.bazel.repository.skylark.SkylarkPath",
+    "com.google.devtools.build.lib.bazel.repository.skylark.SkylarkRepositoryContext",
+    "com.google.devtools.build.lib.bazel.repository.skylark.SkylarkRepositoryModule",
+]
 
 genrule(
     name = "gen_skylarklibrary",
     outs = ["skylark-library.zip"],
     cmd = "mkdir -p $(@D)/skylark-lib &&" +
-          "$(location //src/main/java/com/google/devtools/build/docgen:skydoc_bin) $(@D)/skylark-lib &&" +
-          "zip -qj $@ $(@D)/skylark-lib/*",
+          "$(location //src/main/java/com/google/devtools/build/docgen:skydoc_bin) $(@D)/skylark-lib " +
+          " ".join(SKYLARK_REPOSITORY_CLASSES) +
+          " && zip -qj $@ $(@D)/skylark-lib/*",
     tools = ["//src/main/java/com/google/devtools/build/docgen:skydoc_bin"],
+    visibility = ["//site:__pkg__"],
 )
 
 # Bootstrapping SingleJar using Skylark rules
 #
-load("//tools:build_rules/java_rules_skylark.bzl", "bootstrap_java_library")
+load("//tools/build_rules:java_rules_skylark.bzl", "bootstrap_java_library")
 
 bootstrap_java_library(
     name = "shell-skylark",
     srcs = glob(["shell/*.java"]),
-    jars = ["//third_party:guava"],
+    jars = ["//third_party:guava-jars"],
 )
 
 ########################################################################

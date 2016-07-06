@@ -45,6 +45,14 @@ using std::vector;
 
 namespace blaze {
 
+string ServerPidFile() {
+  return "server.pid.txt";
+}
+
+string ServerPidSymlink() {
+  return "server.pid";
+}
+
 string GetUserName() {
   const char *user = getenv("USER");
   if (user && user[0] != '\0') return user;
@@ -57,15 +65,9 @@ string GetUserName() {
   return pwent->pw_name;
 }
 
-// Returns the given path in absolute form.  Does not change paths that are
-// already absolute.
-//
-// If called from working directory "/bar":
-//   MakeAbsolute("foo") --> "/bar/foo"
-//   MakeAbsolute("/foo") ---> "/foo"
 string MakeAbsolute(const string &path) {
   // Check if path is already absolute.
-  if (path.empty() || path[0] == '/') {
+  if (path.empty() || path[0] == '/' || (isalpha(path[0]) && path[1] == ':')) {
     return path;
   }
 
@@ -201,7 +203,7 @@ bool ReadFile(const string &filename, string *content) {
 // Writes 'content' into file 'filename', and makes it executable.
 // Returns false on failure, sets errno.
 bool WriteFile(const string &content, const string &filename) {
-  DeleteFile(filename);  // We don't care about the success of this.
+  UnlinkPath(filename);  // We don't care about the success of this.
   int fd = open(filename.c_str(), O_CREAT|O_WRONLY|O_TRUNC, 0755);  // chmod +x
   if (fd == -1) {
     return false;
@@ -218,10 +220,8 @@ bool WriteFile(const string &content, const string &filename) {
   return static_cast<uint>(r) == content.size();
 }
 
-// Deletes the file 'filename'.
-// Returns false on failure, sets errno.
-bool DeleteFile(const string &filename) {
-  return unlink(filename.c_str()) == 0;
+bool UnlinkPath(const string &file_path) {
+  return unlink(file_path.c_str()) == 0;
 }
 
 // Returns true iff both stdout and stderr are connected to a
@@ -291,22 +291,20 @@ bool VerboseLogging() {
 
 // Read the Jvm version from a file descriptor. The read fd
 // should contains a similar output as the java -version output.
-string ReadJvmVersion(int fd) {
-  string version_string;
-  if (ReadFileDescriptor(fd, &version_string)) {
-    // try to look out for 'version "'
-    static const string version_pattern = "version \"";
-    size_t found = version_string.find(version_pattern);
-    if (found != string::npos) {
-      found += version_pattern.size();
-      // If we found "version \"", process until next '"'
-      size_t end = version_string.find("\"", found);
-      if (end == string::npos) {  // consider end of string as a '"'
-        end = version_string.size();
-      }
-      return version_string.substr(found, end - found);
+string ReadJvmVersion(const string& version_string) {
+  // try to look out for 'version "'
+  static const string version_pattern = "version \"";
+  size_t found = version_string.find(version_pattern);
+  if (found != string::npos) {
+    found += version_pattern.size();
+    // If we found "version \"", process until next '"'
+    size_t end = version_string.find("\"", found);
+    if (end == string::npos) {  // consider end of string as a '"'
+      end = version_string.size();
     }
+    return version_string.substr(found, end - found);
   }
+
   return "";
 }
 
@@ -315,28 +313,8 @@ string GetJvmVersion(const string &java_exe) {
   args.push_back("java");
   args.push_back("-version");
 
-  int fds[2];
-  if (pipe(fds)) {
-    pdie(blaze_exit_code::INTERNAL_ERROR, "pipe creation failed");
-  }
-
-  int child = fork();
-  if (child == -1) {
-    pdie(blaze_exit_code::INTERNAL_ERROR, "fork() failed");
-  } else if (child > 0) {  // we're the parent
-    close(fds[1]);         // parent keeps only the reading side
-    return ReadJvmVersion(fds[0]);
-  } else {
-    close(fds[0]);  // child keeps only the writing side
-    // Redirect output to the writing side of the dup.
-    dup2(fds[1], STDOUT_FILENO);
-    dup2(fds[1], STDERR_FILENO);
-    // Execute java -version
-    ExecuteProgram(java_exe, args);
-    pdie(blaze_exit_code::INTERNAL_ERROR, "Failed to run java -version");
-  }
-  // The if never falls through here.
-  return NULL;
+  string version_string = RunProgram(java_exe, args);
+  return ReadJvmVersion(version_string);
 }
 
 bool CheckJavaVersionIsAtLeast(const string &jvm_version,
@@ -363,6 +341,89 @@ bool CheckJavaVersionIsAtLeast(const string &jvm_version,
     }
   }
   return true;
+}
+
+uint64_t AcquireLock(const string& output_base, bool batch_mode, bool block,
+                     BlazeLock* blaze_lock) {
+  string lockfile = output_base + "/lock";
+  int lockfd = open(lockfile.c_str(), O_CREAT|O_RDWR, 0644);
+
+  if (lockfd < 0) {
+    pdie(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR,
+         "cannot open lockfile '%s' for writing", lockfile.c_str());
+  }
+
+  // Keep server from inheriting a useless fd if we are not in batch mode
+  if (!batch_mode) {
+    if (fcntl(lockfd, F_SETFD, FD_CLOEXEC) == -1) {
+      pdie(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR,
+           "fcntl(F_SETFD) failed for lockfile");
+    }
+  }
+
+  struct flock lock;
+  lock.l_type = F_WRLCK;
+  lock.l_whence = SEEK_SET;
+  lock.l_start = 0;
+  // This doesn't really matter now, but allows us to subdivide the lock
+  // later if that becomes meaningful.  (Ranges beyond EOF can be locked.)
+  lock.l_len = 4096;
+
+  uint64_t wait_time = 0;
+  // Try to take the lock, without blocking.
+  if (fcntl(lockfd, F_SETLK, &lock) == -1) {
+    if (errno != EACCES && errno != EAGAIN) {
+      pdie(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR,
+           "unexpected result from F_SETLK");
+    }
+
+    // We didn't get the lock.  Find out who has it.
+    struct flock probe = lock;
+    probe.l_pid = 0;
+    if (fcntl(lockfd, F_GETLK, &probe) == -1) {
+      pdie(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR,
+           "unexpected result from F_GETLK");
+    }
+    if (!block) {
+      die(blaze_exit_code::BAD_ARGV,
+          "Another command is running (pid=%d). Exiting immediately.",
+          probe.l_pid);
+    }
+    fprintf(stderr, "Another command is running (pid = %d).  "
+            "Waiting for it to complete...", probe.l_pid);
+    fflush(stderr);
+
+    // Take a clock sample for that start of the waiting time
+    uint64_t st = MonotonicClock();
+    // Try to take the lock again (blocking).
+    int r;
+    do {
+      r = fcntl(lockfd, F_SETLKW, &lock);
+    } while (r == -1 && errno == EINTR);
+    fprintf(stderr, "\n");
+    if (r == -1) {
+      pdie(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR,
+           "couldn't acquire file lock");
+    }
+    // Take another clock sample, calculate elapsed
+    uint64_t et = MonotonicClock();
+    wait_time = (et - st) / 1000000LL;
+  }
+
+  // Identify ourselves in the lockfile.
+  ftruncate(lockfd, 0);
+  const char *tty = ttyname(STDIN_FILENO);  // NOLINT (single-threaded)
+  string msg = "owner=launcher\npid="
+      + ToString(getpid()) + "\ntty=" + (tty ? tty : "") + "\n";
+  // Don't bother checking for error, since it's unlikely and unimportant.
+  // The contents are currently meant only for debugging.
+  write(lockfd, msg.data(), msg.size());
+  blaze_lock->lockfd = lockfd;
+  return wait_time;
+}
+
+void ReleaseLock(BlazeLock* blaze_lock) {
+  close(blaze_lock->lockfd);
 }
 
 }  // namespace blaze

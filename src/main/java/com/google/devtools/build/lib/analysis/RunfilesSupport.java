@@ -22,6 +22,7 @@ import com.google.devtools.build.lib.analysis.SourceManifestAction.ManifestType;
 import com.google.devtools.build.lib.analysis.actions.ActionConstructionContext;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
 import com.google.devtools.build.lib.analysis.config.RunUnder;
+import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.packages.TargetUtils;
 import com.google.devtools.build.lib.util.Preconditions;
 import com.google.devtools.build.lib.vfs.FileSystemUtils;
@@ -63,7 +64,8 @@ import java.util.Set;
  * in the dependency analysis, we create a Middleman Artifact which depends on all of these. Actions
  * which will run an executable should depend on this Middleman Artifact.
  */
-public class RunfilesSupport {
+@Immutable
+public final class RunfilesSupport {
   private static final String RUNFILES_DIR_EXT = ".runfiles";
 
   private final Runfiles runfiles;
@@ -97,7 +99,8 @@ public class RunfilesSupport {
         && TargetUtils.isTestRule(ruleContext.getRule())) {
       TransitiveInfoCollection runUnderTarget =
           ruleContext.getPrerequisite(":run_under", Mode.DATA);
-      runfiles = new Runfiles.Builder(ruleContext.getWorkspaceName())
+      runfiles = new Runfiles.Builder(
+          ruleContext.getWorkspaceName(), ruleContext.getConfiguration().legacyExternalRunfiles())
           .merge(getRunfiles(runUnderTarget))
           .merge(runfiles)
           .build();
@@ -233,6 +236,13 @@ public class RunfilesSupport {
   }
 
   /**
+   * Returns the name of the workspace that the build is occurring in.
+   */
+  public PathFragment getWorkspaceName() {
+    return runfiles.getSuffix();
+  }
+
+  /**
    * Returns the middleman artifact that depends on getExecutable(),
    * getRunfilesManifest(), and getRunfilesSymlinkTargets(). Anything which
    * needs to actually run the executable should depend on this.
@@ -301,7 +311,8 @@ public class RunfilesSupport {
                 artifactsMiddleman,
                 outputManifest,
                 /*filesetTree=*/ false,
-                config.getShExecutable()));
+                config.getShExecutable(),
+                config.getLocalShellEnvironment()));
     return outputManifest;
   }
 
@@ -331,7 +342,6 @@ public class RunfilesSupport {
    *
    * @return the Runfiles object
    */
-
   private static Runfiles getRunfiles(TransitiveInfoCollection target) {
     RunfilesProvider runfilesProvider = target.getProvider(RunfilesProvider.class);
     if (runfilesProvider != null) {

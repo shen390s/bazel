@@ -38,11 +38,13 @@ import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.collect.nestedset.Order;
 import com.google.devtools.build.lib.packages.TargetUtils;
 import com.google.devtools.build.lib.rules.RuleConfiguredTargetFactory;
+import com.google.devtools.build.lib.rules.apple.Platform;
 import com.google.devtools.build.lib.rules.cpp.CcToolchainFeatures.FeatureConfiguration;
 import com.google.devtools.build.lib.rules.cpp.CppConfiguration.DynamicMode;
 import com.google.devtools.build.lib.rules.cpp.Link.LinkStaticness;
 import com.google.devtools.build.lib.rules.cpp.Link.LinkTargetType;
 import com.google.devtools.build.lib.rules.cpp.LinkerInputs.LibraryToLink;
+import com.google.devtools.build.lib.rules.test.ExecutionInfoProvider;
 import com.google.devtools.build.lib.rules.test.InstrumentedFilesProvider;
 import com.google.devtools.build.lib.syntax.Type;
 import com.google.devtools.build.lib.util.FileTypeSet;
@@ -95,7 +97,8 @@ public abstract class CcBinary implements RuleConfiguredTargetFactory {
       Iterable<Artifact> fakeLinkerInputs,
       boolean fake,
       ImmutableList<Pair<Artifact, Label>> cAndCppSources) {
-    Runfiles.Builder builder = new Runfiles.Builder(context.getWorkspaceName());
+    Runfiles.Builder builder = new Runfiles.Builder(
+        context.getWorkspaceName(), context.getConfiguration().legacyExternalRunfiles());
     Function<TransitiveInfoCollection, Runfiles> runfilesMapping =
         CppRunfilesProvider.runfilesFunction(linkStaticness != LinkStaticness.DYNAMIC);
     boolean linkshared = isLinkShared(context);
@@ -138,7 +141,9 @@ public abstract class CcBinary implements RuleConfiguredTargetFactory {
       builder.addSymlinksToArtifacts(cppCompilationContext.getDeclaredIncludeSrcs());
       // Add additional files that are referenced from the compile command, like module maps
       // or header modules.
-      builder.addSymlinksToArtifacts(cppCompilationContext.getAdditionalInputs());
+      builder.addSymlinksToArtifacts(
+          cppCompilationContext.getAdditionalInputs(
+              CppHelper.usePic(context, !isLinkShared(context))));
     }
     return builder.build();
   }
@@ -182,10 +187,17 @@ public abstract class CcBinary implements RuleConfiguredTargetFactory {
         new PathFragment(ruleContext.getTarget().getName() + OsUtils.executableExtension());
     Artifact binary = ruleContext.getPackageRelativeArtifact(
         binaryPath, ruleContext.getConfiguration().getBinDirectory());
-    CppLinkAction.Builder linkActionBuilder = determineLinkerArguments(
-        ruleContext, common, precompiledFiles, ccCompilationOutputs,
-        cppCompilationContext.getCompilationPrerequisites(), fake, binary, linkStaticness,
-        linkopts);
+    CppLinkAction.Builder linkActionBuilder =
+        determineLinkerArguments(
+            ruleContext,
+            common,
+            precompiledFiles,
+            ccCompilationOutputs,
+            cppCompilationContext.getTransitiveCompilationPrerequisites(),
+            fake,
+            binary,
+            linkStaticness,
+            linkopts);
     linkActionBuilder.setUseTestOnlyFlags(useTestOnlyFlags);
     linkActionBuilder.addNonLibraryInputs(ccCompilationOutputs.getHeaderTokenFiles());
 
@@ -209,6 +221,7 @@ public abstract class CcBinary implements RuleConfiguredTargetFactory {
     linkActionBuilder.setLinkType(linkType);
     linkActionBuilder.setLinkStaticness(linkStaticness);
     linkActionBuilder.setFake(fake);
+    linkActionBuilder.setFeatureConfiguration(featureConfiguration);
 
     if (CppLinkAction.enableSymbolsCounts(cppConfiguration, fake, linkType)) {
       linkActionBuilder.setSymbolCountsOutput(ruleContext.getPackageRelativeArtifact(
@@ -321,6 +334,7 @@ public abstract class CcBinary implements RuleConfiguredTargetFactory {
         fake);
 
     Map<Artifact, IncludeScannable> scannableMap = new LinkedHashMap<>();
+    Map<PathFragment, Artifact> sourceFileMap = new LinkedHashMap<>();
     if (cppConfiguration.isLipoContextCollector()) {
       for (IncludeScannable scannable : transitiveLipoInfo.getTransitiveIncludeScannables()) {
         // These should all be CppCompileActions, which should have only one source file.
@@ -328,9 +342,18 @@ public abstract class CcBinary implements RuleConfiguredTargetFactory {
         Artifact source =
             Iterables.getOnlyElement(scannable.getIncludeScannerSources());
         scannableMap.put(source, scannable);
+        sourceFileMap.put(source.getExecPath(), source);
       }
     }
-
+   
+    // Support test execution on darwin.
+    if (Platform.isApplePlatform(cppConfiguration.getTargetCpu())
+        && TargetUtils.isTestRule(ruleContext.getRule())) {
+      ruleBuilder.add(
+          ExecutionInfoProvider.class,
+          new ExecutionInfoProvider(ImmutableMap.of("requires-darwin", "")));
+    }
+    
     return ruleBuilder
         .add(RunfilesProvider.class, RunfilesProvider.simple(runfiles))
         .add(
@@ -339,7 +362,8 @@ public abstract class CcBinary implements RuleConfiguredTargetFactory {
                 ruleContext.getLabel(), strippedFile, executable, explicitDwpFile))
         .setRunfilesSupport(runfilesSupport, executable)
         .addProvider(LipoContextProvider.class, new LipoContextProvider(
-            cppCompilationContext, ImmutableMap.copyOf(scannableMap)))
+            cppCompilationContext, ImmutableMap.copyOf(scannableMap),
+            ImmutableMap.copyOf(sourceFileMap)))
         .addProvider(CppLinkAction.Context.class, linkContext)
         .addSkylarkTransitiveInfo(CcSkylarkApiProvider.NAME, new CcSkylarkApiProvider())
         .build();
@@ -608,6 +632,7 @@ public abstract class CcBinary implements RuleConfiguredTargetFactory {
             cppConfiguration.isLipoContextCollector(),
             cppConfiguration.processHeadersInDependencies(),
             CppHelper.usePic(ruleContext, false));
+    NestedSet<Artifact> artifactsToForce = collectHiddenTopLevelArtifacts(ruleContext);
     builder
         .setFilesToBuild(filesToBuild)
         .add(CppCompilationContext.class, cppCompilationContext)
@@ -630,9 +655,21 @@ public abstract class CcBinary implements RuleConfiguredTargetFactory {
         .addOutputGroup(
             OutputGroupProvider.TEMP_FILES, getTemps(cppConfiguration, ccCompilationOutputs))
         .addOutputGroup(OutputGroupProvider.FILES_TO_COMPILE, filesToCompile)
+        .addOutputGroup(OutputGroupProvider.HIDDEN_TOP_LEVEL, artifactsToForce)
         .addOutputGroup(
             OutputGroupProvider.COMPILATION_PREREQUISITES,
             CcCommon.collectCompilationPrerequisites(ruleContext, cppCompilationContext));
+  }
+
+  private static NestedSet<Artifact> collectHiddenTopLevelArtifacts(RuleContext ruleContext) {
+    // Ensure that we build all the dependencies, otherwise users may get confused.
+    NestedSetBuilder<Artifact> artifactsToForceBuilder = NestedSetBuilder.stableOrder();
+    for (OutputGroupProvider dep :
+        ruleContext.getPrerequisites("deps", Mode.TARGET, OutputGroupProvider.class)) {
+      artifactsToForceBuilder.addTransitive(
+          dep.getOutputGroup(OutputGroupProvider.HIDDEN_TOP_LEVEL));
+    }
+    return artifactsToForceBuilder.build();
   }
 
   private static NestedSet<Artifact> collectExecutionDynamicLibraryArtifacts(

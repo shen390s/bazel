@@ -14,13 +14,14 @@
 
 package com.google.devtools.build.lib.bazel.repository;
 
-import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.hash.Hasher;
 import com.google.common.hash.Hashing;
+import com.google.devtools.build.lib.analysis.BlazeDirectories;
 import com.google.devtools.build.lib.analysis.RuleDefinition;
+import com.google.devtools.build.lib.bazel.repository.downloader.HttpDownloader;
 import com.google.devtools.build.lib.bazel.rules.workspace.MavenJarRule;
 import com.google.devtools.build.lib.cmdline.RepositoryName;
 import com.google.devtools.build.lib.packages.AggregatingAttributeMapper;
@@ -61,7 +62,7 @@ public class MavenJarFunction extends HttpArchiveFunction {
   private static final String DEFAULT_SERVER = "default";
 
   @Override
-  public boolean isLocal() {
+  public boolean isLocal(Rule rule) {
     return false;
   }
 
@@ -105,25 +106,26 @@ public class MavenJarFunction extends HttpArchiveFunction {
   }
 
   @Override
-  public SkyValue fetch(Rule rule, Path outputDirectory, Environment env)
-      throws RepositoryFunctionException, InterruptedException {
+  public SkyValue fetch(
+      Rule rule, Path outputDirectory, BlazeDirectories directories, Environment env)
+          throws RepositoryFunctionException, InterruptedException {
     AggregatingAttributeMapper mapper = AggregatingAttributeMapper.of(rule);
     MavenServerValue serverValue = getServer(rule, env);
     if (env.valuesMissing()) {
       return null;
     }
-    MavenDownloader downloader = createMavenDownloader(mapper, serverValue);
-    return createOutputTree(downloader, env);
+    MavenDownloader downloader = createMavenDownloader(directories, mapper, serverValue);
+    return createOutputTree(downloader);
   }
 
-  @VisibleForTesting
-  MavenDownloader createMavenDownloader(AttributeMap mapper, MavenServerValue serverValue) {
+  private MavenDownloader createMavenDownloader(
+      BlazeDirectories directories, AttributeMap mapper, MavenServerValue serverValue) {
     String name = mapper.getName();
-    Path outputDirectory = getExternalRepositoryDirectory().getRelative(name);
+    Path outputDirectory = getExternalRepositoryDirectory(directories).getRelative(name);
     return new MavenDownloader(name, mapper, outputDirectory, serverValue);
   }
 
-  SkyValue createOutputTree(MavenDownloader downloader, Environment env)
+  private SkyValue createOutputTree(MavenDownloader downloader)
       throws RepositoryFunctionException, InterruptedException {
     Path outputDirectory = downloader.getOutputDirectory();
     createDirectory(outputDirectory);
@@ -137,7 +139,7 @@ public class MavenJarFunction extends HttpArchiveFunction {
 
     // Add a WORKSPACE file & BUILD file to the Maven jar.
     Path result = DecompressorValue.decompress(DecompressorDescriptor.builder()
-        .setDecompressor(JarFunction.INSTANCE)
+        .setDecompressor(JarDecompressor.INSTANCE)
         .setTargetKind(MavenJarRule.NAME)
         .setTargetName(downloader.getName())
         .setArchivePath(repositoryJar)

@@ -20,11 +20,11 @@ import static org.junit.Assert.assertTrue;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.testing.EqualsTester;
+import com.google.devtools.build.lib.analysis.BlazeDirectories;
 import com.google.devtools.build.lib.cmdline.PackageIdentifier;
 import com.google.devtools.build.lib.events.NullEventHandler;
 import com.google.devtools.build.lib.pkgcache.PathPackageLocator;
 import com.google.devtools.build.lib.testutil.FoundationTestCase;
-import com.google.devtools.build.lib.util.BlazeClock;
 import com.google.devtools.build.lib.util.io.TimestampGranularityMonitor;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.skyframe.InMemoryMemoizingEvaluator;
@@ -60,15 +60,16 @@ public class ContainingPackageLookupFunctionTest extends FoundationTestCase {
     AtomicReference<PathPackageLocator> pkgLocator =
         new AtomicReference<>(new PathPackageLocator(outputBase, ImmutableList.of(rootDirectory)));
     deletedPackages = new AtomicReference<>(ImmutableSet.<PackageIdentifier>of());
-    ExternalFilesHelper externalFilesHelper = new ExternalFilesHelper(pkgLocator, false);
-    TimestampGranularityMonitor tsgm = new TimestampGranularityMonitor(BlazeClock.instance());
+    ExternalFilesHelper externalFilesHelper = new ExternalFilesHelper(
+        pkgLocator, false, new BlazeDirectories(rootDirectory, rootDirectory, rootDirectory));
 
     Map<SkyFunctionName, SkyFunction> skyFunctions = new HashMap<>();
     skyFunctions.put(SkyFunctions.PACKAGE_LOOKUP, new PackageLookupFunction(deletedPackages));
     skyFunctions.put(SkyFunctions.CONTAINING_PACKAGE_LOOKUP, new ContainingPackageLookupFunction());
     skyFunctions.put(SkyFunctions.BLACKLISTED_PACKAGE_PREFIXES,
         new BlacklistedPackagePrefixesFunction());
-    skyFunctions.put(SkyFunctions.FILE_STATE, new FileStateFunction(tsgm, externalFilesHelper));
+    skyFunctions.put(SkyFunctions.FILE_STATE, new FileStateFunction(
+        new AtomicReference<TimestampGranularityMonitor>(), externalFilesHelper));
     skyFunctions.put(SkyFunctions.FILE, new FileFunction(pkgLocator));
     RecordingDifferencer differencer = new RecordingDifferencer();
     evaluator = new InMemoryMemoizingEvaluator(skyFunctions, differencer);
@@ -82,7 +83,7 @@ public class ContainingPackageLookupFunctionTest extends FoundationTestCase {
   private ContainingPackageLookupValue lookupContainingPackage(String packageName)
       throws InterruptedException {
     SkyKey key =
-        ContainingPackageLookupValue.key(PackageIdentifier.createInDefaultRepo(packageName));
+        ContainingPackageLookupValue.key(PackageIdentifier.createInMainRepo(packageName));
     return driver
         .<ContainingPackageLookupValue>evaluate(
             ImmutableList.of(key),
@@ -103,7 +104,7 @@ public class ContainingPackageLookupFunctionTest extends FoundationTestCase {
     scratch.file("a/BUILD");
     ContainingPackageLookupValue value = lookupContainingPackage("a/b");
     assertTrue(value.hasContainingPackage());
-    assertEquals(PackageIdentifier.createInDefaultRepo("a"), value.getContainingPackageName());
+    assertEquals(PackageIdentifier.createInMainRepo("a"), value.getContainingPackageName());
     assertEquals(rootDirectory, value.getContainingPackageRoot());
   }
 
@@ -112,7 +113,7 @@ public class ContainingPackageLookupFunctionTest extends FoundationTestCase {
     scratch.file("a/b/BUILD");
     ContainingPackageLookupValue value = lookupContainingPackage("a/b");
     assertTrue(value.hasContainingPackage());
-    assertEquals(PackageIdentifier.createInDefaultRepo("a/b"), value.getContainingPackageName());
+    assertEquals(PackageIdentifier.createInMainRepo("a/b"), value.getContainingPackageName());
     assertEquals(rootDirectory, value.getContainingPackageRoot());
   }
 
@@ -122,11 +123,11 @@ public class ContainingPackageLookupFunctionTest extends FoundationTestCase {
     ContainingPackageLookupValue valueA2 = ContainingPackageLookupValue.NONE;
     ContainingPackageLookupValue valueB1 =
         ContainingPackageLookupValue.withContainingPackage(
-            PackageIdentifier.createInDefaultRepo("b"), rootDirectory);
+            PackageIdentifier.createInMainRepo("b"), rootDirectory);
     ContainingPackageLookupValue valueB2 =
         ContainingPackageLookupValue.withContainingPackage(
-            PackageIdentifier.createInDefaultRepo("b"), rootDirectory);
-    PackageIdentifier cFrag = PackageIdentifier.createInDefaultRepo("c");
+            PackageIdentifier.createInMainRepo("b"), rootDirectory);
+    PackageIdentifier cFrag = PackageIdentifier.createInMainRepo("c");
     ContainingPackageLookupValue valueC1 =
         ContainingPackageLookupValue.withContainingPackage(cFrag, rootDirectory);
     ContainingPackageLookupValue valueC2 =

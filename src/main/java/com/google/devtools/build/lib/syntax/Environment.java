@@ -14,10 +14,13 @@
 
 package com.google.devtools.build.lib.syntax;
 
+import static com.google.common.base.Preconditions.checkState;
+
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.events.EventHandler;
 import com.google.devtools.build.lib.events.EventKind;
@@ -74,6 +77,11 @@ import javax.annotation.Nullable;
 public final class Environment implements Freezable {
 
   /**
+   * A phase for enabling or disabling certain builtin functions
+   */
+  public enum Phase { WORKSPACE, LOADING, ANALYSIS }
+
+  /**
    * A Frame is a Map of bindings, plus a {@link Mutability} and a parent Frame
    * from which to inherit bindings.
    *
@@ -98,15 +106,39 @@ public final class Environment implements Freezable {
     private final Mutability mutability;
     final Frame parent;
     final Map<String, Object> bindings = new HashMap<>();
+    // The label for the target this frame is defined in (e.g., //foo:bar.bzl).
+    @Nullable
+    private Label label;
 
-    Frame(Mutability mutability, Frame parent) {
+    private Frame(Mutability mutability, Frame parent) {
       this.mutability = mutability;
       this.parent = parent;
+      this.label = parent == null ? null : parent.label;
     }
 
     @Override
     public final Mutability mutability() {
       return mutability;
+    }
+
+    /**
+     * Attaches a label to an existing frame. This is used to get the repository a Skylark
+     * extension is actually defined in.
+     * @param label the label to attach.
+     * @return a new Frame with the existing frame's properties plus the label.
+     */
+    public Frame setLabel(Label label) {
+      Frame result = new Frame(mutability, this);
+      result.label = label;
+      return result;
+    }
+
+    /**
+     * Returns the label for this frame.
+     */
+    @Nullable
+    public final Label label() {
+      return label;
     }
 
     /**
@@ -306,7 +338,7 @@ public final class Environment implements Freezable {
    * Is this Environment being executed during the loading phase?
    * Many builtin functions are only enabled during the loading phase, and check this flag.
    */
-  private final boolean isLoadingPhase;
+  private Phase phase;
 
   /**
    * When in a lexical (Skylark) Frame, this set contains the variable names that are global,
@@ -323,6 +355,18 @@ public final class Environment implements Freezable {
    * We currently use it to artificially disable recursion.
    */
   @Nullable private Continuation continuation;
+
+  /**
+   * Gets the label of the BUILD file that is using this environment. For example, if a target
+   * //foo has a dependency on //bar which is a Skylark rule defined in //rules:my_rule.bzl being
+   * evaluated in this environment, then this would return //foo.
+   */
+  @Nullable private final Label callerLabel;
+
+  /**
+   * The path to the tools repository.
+   */
+  private final String toolsRepository;
 
   /**
    * Enters a scope by saving state to a new Continuation
@@ -359,11 +403,10 @@ public final class Environment implements Freezable {
   /**
    * Is this Environment being evaluated during the loading phase?
    * This is fixed during Environment setup, and enables various functions
-   * that are not available during the analysis phase.
-   * @return true if this Environment corresponds to code during the loading phase.
+   * that are not available during the analysis or workspace phase.
    */
-  private boolean isLoadingPhase() {
-    return isLoadingPhase;
+  public Phase getPhase() {
+    return phase;
   }
 
   /**
@@ -371,7 +414,7 @@ public final class Environment implements Freezable {
    * @param symbol name of the function being only authorized thus.
    */
   public void checkLoadingPhase(String symbol, Location loc) throws EvalException {
-    if (!isLoadingPhase()) {
+    if (phase != Phase.LOADING) {
       throw new EvalException(loc, symbol + "() can only be called during the loading phase");
     }
   }
@@ -394,7 +437,7 @@ public final class Environment implements Freezable {
   /**
    * @return the current Frame, in which variable side-effects happen.
    */
-  private Frame currentFrame() {
+  public Frame currentFrame() {
     return isGlobal() ? globalFrame : lexicalFrame;
   }
 
@@ -449,7 +492,8 @@ public final class Environment implements Freezable {
    * @param importedExtensions Extension-s from which to import bindings with load()
    * @param isSkylark true if in Skylark context
    * @param fileContentHashCode a hash for the source file being evaluated, if any
-   * @param isLoadingPhase true if in loading phase
+   * @param phase the current phase
+   * @param callerLabel the label this environment came from
    */
   private Environment(
       Frame globalFrame,
@@ -458,7 +502,9 @@ public final class Environment implements Freezable {
       Map<String, Extension> importedExtensions,
       boolean isSkylark,
       @Nullable String fileContentHashCode,
-      boolean isLoadingPhase) {
+      Phase phase,
+      @Nullable Label callerLabel,
+      String toolsRepository) {
     this.globalFrame = Preconditions.checkNotNull(globalFrame);
     this.dynamicFrame = Preconditions.checkNotNull(dynamicFrame);
     Preconditions.checkArgument(globalFrame.mutability().isMutable());
@@ -467,7 +513,9 @@ public final class Environment implements Freezable {
     this.importedExtensions = importedExtensions;
     this.isSkylark = isSkylark;
     this.fileContentHashCode = fileContentHashCode;
-    this.isLoadingPhase = isLoadingPhase;
+    this.phase = phase;
+    this.callerLabel = callerLabel;
+    this.toolsRepository = toolsRepository;
   }
 
   /**
@@ -476,11 +524,13 @@ public final class Environment implements Freezable {
   public static class Builder {
     private final Mutability mutability;
     private boolean isSkylark = false;
-    private boolean isLoadingPhase = false;
+    private Phase phase = Phase.ANALYSIS;
     @Nullable private Frame parent;
     @Nullable private EventHandler eventHandler;
     @Nullable private Map<String, Extension> importedExtensions;
     @Nullable private String fileContentHashCode;
+    private Label label;
+    private String toolsRepository;
 
     Builder(Mutability mutability) {
       this.mutability = mutability;
@@ -493,10 +543,10 @@ public final class Environment implements Freezable {
       return this;
     }
 
-    /** Enables loading phase only functions in this Environment. */
-    public Builder setLoadingPhase() {
-      Preconditions.checkState(!isLoadingPhase);
-      isLoadingPhase = true;
+    /** Enables loading or workspace phase only functions in this Environment. */
+    public Builder setPhase(Phase phase) {
+      Preconditions.checkState(this.phase == Phase.ANALYSIS);
+      this.phase = phase;
       return this;
     }
 
@@ -527,6 +577,12 @@ public final class Environment implements Freezable {
       return this;
     }
 
+    /** Sets the path to the tools repository */
+    public Builder setToolsRepository(String toolsRepository) {
+      this.toolsRepository = toolsRepository;
+      return this;
+    }
+
     /** Builds the Environment. */
     public Environment build() {
       Preconditions.checkArgument(mutability.isMutable());
@@ -538,6 +594,9 @@ public final class Environment implements Freezable {
       if (importedExtensions == null) {
         importedExtensions = ImmutableMap.of();
       }
+      if (phase == Phase.LOADING) {
+        Preconditions.checkState(this.toolsRepository != null);
+      }
       return new Environment(
           globalFrame,
           dynamicFrame,
@@ -545,12 +604,26 @@ public final class Environment implements Freezable {
           importedExtensions,
           isSkylark,
           fileContentHashCode,
-          isLoadingPhase);
+          phase,
+          label,
+          toolsRepository);
+    }
+
+    public Builder setCallerLabel(Label label) {
+      this.label = label;
+      return this;
     }
   }
 
   public static Builder builder(Mutability mutability) {
     return new Builder(mutability);
+  }
+
+  /**
+   * Returns the caller's label.
+   */
+  public Label getCallerLabel() {
+    return callerLabel;
   }
 
   /**
@@ -856,7 +929,7 @@ public final class Environment implements Freezable {
 
   /**
    * Parses some String input without a supporting file, returning statements and comments.
-   * @param input a list of lines of code
+   * @param inputLines a list of lines of code
    */
   @VisibleForTesting
   Parser.ParseResult parseFileWithComments(String... inputLines) {
@@ -891,5 +964,10 @@ public final class Environment implements Freezable {
       }
     }
     return last;
+  }
+
+  public String getToolsRepository() {
+    checkState(toolsRepository != null);
+    return toolsRepository;
   }
 }

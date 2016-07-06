@@ -21,7 +21,7 @@ cd $(dirname "$0")
 cd ..
 
 function query() {
-    ./output/bazel query "$@"
+    ./output/bazel query --keep_going "$@"
 }
 
 # Compile bazel
@@ -30,8 +30,9 @@ function query() {
 # Build almost everything.
 # //third_party/ijar/test/... is disabled due to #273.
 # xcode and android tools do not work out of the box.
-./output/bazel build -- //src/{main,java_tools,test/{java,cpp}}/... //third_party/... \
-  -//third_party/ijar/test/... -//third_party/java/j2objc/... >&2 \
+targets_to_build=(//src/{main,java_tools,test/{java,cpp}}/... //third_party/...)
+targets_to_omit=(-//third_party/ijar/test/... -//third_party/java/j2objc/...)
+./output/bazel build -- ${targets_to_build[@]} ${targets_to_omit[@]} >&2 \
   || exit $?
 
 # Source roots.
@@ -68,8 +69,10 @@ function get_target_of() {
 function get_consuming_target() {
   # Here to the god of bazel, I should probably offer one or two memory chips for that
   local target=$(get_target_of $1)
-  local generating_target=$(query "deps(${target}, 1) - ${target}")
-  local java_library=$(query "rdeps(//src/..., ${generating_target}, 1) - ${generating_target}")
+  # Get the rule that generated this file.
+  local generating_target=$(query "kind(rule, deps(${target}, 1)) - ${target}")
+  [[ -n $generating_target ]] || echo "Couldn't get generating target for ${target}" 1>&2
+  local java_library=$(query "rdeps(set(${targets_to_build[@]}) ${targets_to_omit[@]}, ${generating_target}, 1) - ${generating_target}")
   echo "${java_library}"
 }
 
@@ -83,12 +86,6 @@ function collect_generated_paths() {
   for path in $(find bazel-genfiles/ -name "*.java" | sed 's|/\{0,1\}bazel-genfiles/\{1,2\}|//|' | uniq); do
     source_path=$(echo ${path} | sed 's|//|bazel-genfiles/|' | sed 's|/com/.*$||')
     echo "$(get_containing_library ${path}):${source_path}"
-  done &&
-  # Add in "external" jars which don't have source paths.
-  for jardir in "jar/" ""; do
-    for path in $(find bazel-genfiles/${jardir}_ijar -name "*.jar" | sed 's|^/+||' | uniq); do
-      echo "${path}:"
-    done
   done | sort -u
 }
 

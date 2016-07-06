@@ -16,8 +16,10 @@ package com.google.devtools.build.lib.rules.objc;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
+import com.google.devtools.build.lib.analysis.config.BuildConfiguration.LabelConverter;
 import com.google.devtools.build.lib.analysis.config.BuildOptions;
 import com.google.devtools.build.lib.analysis.config.FragmentOptions;
+import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.packages.Attribute.SplitTransition;
 import com.google.devtools.build.lib.rules.apple.DottedVersion;
 import com.google.devtools.build.lib.rules.apple.DottedVersionConverter;
@@ -52,11 +54,20 @@ public class ObjcCommandLineOptions extends FragmentOptions {
           + "on the machine the simulator will be run on.")
   public String iosSimulatorDevice;
 
-  @Option(name = "objc_generate_debug_symbols",
+  // TODO(b/28110492): Deprecate this.
+  @Option(
+    name = "objc_generate_debug_symbols",
+    defaultValue = "false",
+    category = "flags",
+    help = "Specifies whether to generate debug symbol(.dSYM) file."
+  )
+  public boolean generateDebugSymbols;
+
+  @Option(name = "objc_generate_linkmap",
       defaultValue = "false",
       category = "flags",
-      help = "Specifies whether to generate debug symbol(.dSYM) file.")
-  public boolean generateDebugSymbols;
+      help = "Specifies whether to generate a linkmap file.")
+  public boolean generateLinkmap;
 
   @Option(name = "objccopt",
       allowMultiple = true,
@@ -120,6 +131,14 @@ public class ObjcCommandLineOptions extends FragmentOptions {
   )
   public boolean enableBinaryStripping;
 
+  @Option(
+    name = "apple_generate_dsym",
+    defaultValue = "false",
+    category = "flags",
+    help = "Whether to generate debug symbol(.dSYM) file(s)."
+  )
+  public boolean appleGenerateDsym;
+
   // This option exists because two configurations are not allowed to have the same cache key
   // (partially derived from options). Since we have multiple transitions (see
   // getPotentialSplitTransitions below) that may result in the same configuration values at runtime
@@ -171,13 +190,55 @@ public class ObjcCommandLineOptions extends FragmentOptions {
             + " and system libraries."
   )
   public boolean prioritizeStaticLibs;
+
+  @Option(
+    name = "objc_debug_with_GLIBCXX",
+    defaultValue = "true",
+    category = "undocumented",
+    help =
+      "If set, and compilation mode is set to 'dbg', define GLIBCXX_DEBUG, "
+        + " GLIBCXX_DEBUG_PEDANTIC and GLIBCPP_CONCEPT_CHECKS."
+  )
+  public boolean debugWithGlibcxx;
+
+  @Option(
+    name = "extra_entitlements",
+    defaultValue = "null",
+    category = "flags",
+    converter = LabelConverter.class,
+    help =
+        "Location of a .entitlements file that is merged into any iOS signing action in this "
+            + "build."
+  )
+  public Label extraEntitlements;
+
+  @Option(
+    name = "experimental_auto_top_level_union_objc_protos",
+    defaultValue = "false",
+    category = "flags",
+    help =
+        "Specifies whether to use the experimental proto generation scheme, in which they are all "
+            + "generated and linked into the final linking target."
+  )
+  public boolean experimentalAutoTopLevelUnionObjCProtos;
+
+  @Option(
+    name = "device_debug_entitlements",
+    defaultValue = "true",
+    category = "flags",
+    help =
+        "If set, and compilation mode is not 'opt', objc apps will include debug entitlements "
+            + "when signing."
+  )
+  public boolean deviceDebugEntitlements;
   
   @VisibleForTesting static final String DEFAULT_MINIMUM_IOS = "7.0";
 
   @Override
   public List<SplitTransition<BuildOptions>> getPotentialSplitTransitions() {
     return ImmutableList.of(
-        IosApplication.SPLIT_ARCH_TRANSITION, IosExtension.MINIMUM_OS_AND_SPLIT_ARCH_TRANSITION);
+        IosApplication.SPLIT_ARCH_TRANSITION, IosExtension.MINIMUM_OS_AND_SPLIT_ARCH_TRANSITION,
+        AppleWatch1Extension.MINIMUM_OS_AND_SPLIT_ARCH_TRANSITION);
   }
 
   /** Converter for the iOS configuration distinguisher. */

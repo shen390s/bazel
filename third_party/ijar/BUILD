@@ -7,27 +7,24 @@ package(
 
 licenses(["notice"])  # Apache 2.0
 
-filegroup(
-    name = "srcs",
-    srcs = glob(["**"]),
-    visibility = ["//third_party:__pkg__"],
-)
-
 cc_library(
     name = "zip",
     srcs = [
-        "mapped_file_unix.cc",
         "zip.cc",
-    ],
+    ] + select({
+        "//src:windows": [
+            "mapped_file_windows.cc",
+        ],
+        "//conditions:default": [
+            "mapped_file_unix.cc",
+        ],
+    }),
     hdrs = [
         "common.h",
         "mapped_file.h",
         "zip.h",
     ],
-    # TODO(bazel-team): we should replace the -lz flag, it is non-hermetic.
-    #  We should instead use a new_local_repository once the autoconf
-    #  mechanism is ready.
-    linkopts = ["-lz"],
+    deps = ["//third_party/zlib"],
 )
 
 cc_binary(
@@ -45,4 +42,10 @@ cc_binary(
     ],
     visibility = ["//visibility:public"],
     deps = [":zip"],
+)
+
+filegroup(
+    name = "srcs",
+    srcs = glob(["**"]) + ["//third_party/ijar/test:srcs"],
+    visibility = ["//third_party:__pkg__"],
 )

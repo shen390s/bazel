@@ -33,7 +33,9 @@ public class CcToolchainSuiteTest extends BuildViewTestCase {
         "cc_toolchain_suite(",
         "    name = 'suite',",
         "    toolchains = { ",
-        "       'cpu': ':cc-toolchain', 'k8': ':cc-toolchain', 'darwin': ':cc-toolchain' ",
+        "       'cpu|cpu-compiler': ':cc-toolchain',",
+        "       'k8|k8-compiler': ':cc-toolchain',",
+        "       'darwin|cpu-compiler': ':cc-toolchain' ",
         "    },",
         "    proto = \"\"\"",
         "major_version: 'v1'",
@@ -107,12 +109,15 @@ public class CcToolchainSuiteTest extends BuildViewTestCase {
         "    objcopy_files = 'objcopy',",
         "    all_files = ':every-file',",
         "    dynamic_runtime_libs = ['dynamic-runtime-libs'],",
-        "    static_runtime_libs = ['static-runtime-libs'])");
+        "    static_runtime_libs = ['static-runtime-libs'])",
+        "",
+        "filegroup(name = 'every-file', srcs = ['//cc:everything'])");
 
     invalidatePackages();
     useConfiguration("--crosstool_top=//cc:suite");
     CppConfiguration cppConfig = getTargetConfiguration().getFragment(CppConfiguration.class);
     assertThat(cppConfig.getTargetCpu()).isEqualTo("cpu");
     assertThat(cppConfig.getAbi()).isEqualTo("cpu-abi");
+    assertThat(cppConfig.getCompiler()).isEqualTo("cpu-compiler");
   }
 }

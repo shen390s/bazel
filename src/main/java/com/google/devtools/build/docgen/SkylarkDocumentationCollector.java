@@ -22,6 +22,13 @@ import com.google.devtools.build.docgen.skylark.SkylarkModuleDoc;
 import com.google.devtools.build.lib.analysis.TransitiveInfoCollection;
 import com.google.devtools.build.lib.rules.SkylarkModules;
 import com.google.devtools.build.lib.rules.SkylarkRuleContext;
+import com.google.devtools.build.lib.rules.android.AndroidSkylarkApiProvider;
+import com.google.devtools.build.lib.rules.apple.AppleConfiguration;
+import com.google.devtools.build.lib.rules.cpp.CppConfiguration;
+import com.google.devtools.build.lib.rules.java.JavaConfiguration;
+import com.google.devtools.build.lib.rules.java.JavaRuleOutputJarsProvider;
+import com.google.devtools.build.lib.rules.java.JavaSkylarkApiProvider;
+import com.google.devtools.build.lib.rules.java.Jvm;
 import com.google.devtools.build.lib.skylarkinterface.SkylarkCallable;
 import com.google.devtools.build.lib.skylarkinterface.SkylarkModule;
 import com.google.devtools.build.lib.skylarkinterface.SkylarkSignature;
@@ -62,10 +69,10 @@ final class SkylarkDocumentationCollector {
    * Collects the documentation for all Skylark modules and returns a map that maps Skylark
    * module name to the module documentation.
    */
-  public static Map<String, SkylarkModuleDoc> collectModules() {
+  public static Map<String, SkylarkModuleDoc> collectModules(String... clazz) {
     Map<String, SkylarkModuleDoc> modules = new TreeMap<>();
-    Map<String, SkylarkModuleDoc> builtinModules = collectBuiltinModules();
-    Map<SkylarkModule, Class<?>> builtinJavaObjects = collectBuiltinJavaObjects();
+    Map<String, SkylarkModuleDoc> builtinModules = collectBuiltinModules(clazz);
+    Map<SkylarkModule, Class<?>> builtinJavaObjects = collectBuiltinJavaObjects(clazz);
 
     modules.putAll(builtinModules);
     for (SkylarkModuleDoc builtinObject : builtinModules.values()) {
@@ -130,12 +137,20 @@ final class SkylarkDocumentationCollector {
     }
   }
 
-  private static Map<String, SkylarkModuleDoc> collectBuiltinModules() {
+  private static Map<String, SkylarkModuleDoc> collectBuiltinModules(String... clazz) {
     Map<String, SkylarkModuleDoc> modules = new HashMap<>();
     collectBuiltinDoc(modules, Runtime.class.getDeclaredFields());
     collectBuiltinDoc(modules, MethodLibrary.class.getDeclaredFields());
     for (Class<?> moduleClass : SkylarkModules.MODULES) {
       collectBuiltinDoc(modules, moduleClass.getDeclaredFields());
+    }
+    for (String c : clazz) {
+      try {
+        collectBuiltinDoc(modules,
+            SkylarkDocumentationCollector.class.getClassLoader().loadClass(c).getDeclaredFields());
+      } catch (ClassNotFoundException e) {
+        System.err.println("SkylarkModule class " + c + " could not be found, ignoring...");
+      }
     }
     return modules;
   }
@@ -164,10 +179,26 @@ final class SkylarkDocumentationCollector {
     }
   }
 
-  private static Map<SkylarkModule, Class<?>> collectBuiltinJavaObjects() {
+  private static Map<SkylarkModule, Class<?>> collectBuiltinJavaObjects(String ...clazz) {
     Map<SkylarkModule, Class<?>> modules = new HashMap<>();
     collectBuiltinModule(modules, SkylarkRuleContext.class);
     collectBuiltinModule(modules, TransitiveInfoCollection.class);
+
+    collectBuiltinModule(modules, AppleConfiguration.class);
+    collectBuiltinModule(modules, CppConfiguration.class);
+    collectBuiltinModule(modules, JavaConfiguration.class);
+    collectBuiltinModule(modules, Jvm.class);
+    collectBuiltinModule(modules, JavaSkylarkApiProvider.class);
+    collectBuiltinModule(modules, JavaRuleOutputJarsProvider.OutputJar.class);
+    collectBuiltinModule(modules, AndroidSkylarkApiProvider.class);
+    for (String c : clazz) {
+      try {
+        collectBuiltinModule(modules,
+            SkylarkDocumentationCollector.class.getClassLoader().loadClass(c));
+      } catch (ClassNotFoundException e) {
+        System.err.println("SkylarkModule class " + c + " could not be found, ignoring...");
+      }
+    }
     return modules;
   }
 

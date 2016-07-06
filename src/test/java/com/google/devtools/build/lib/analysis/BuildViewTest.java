@@ -41,7 +41,6 @@ import com.google.devtools.build.lib.analysis.config.InvalidConfigurationExcepti
 import com.google.devtools.build.lib.analysis.util.AnalysisMock;
 import com.google.devtools.build.lib.analysis.util.BuildViewTestBase;
 import com.google.devtools.build.lib.cmdline.Label;
-import com.google.devtools.build.lib.packages.Aspect;
 import com.google.devtools.build.lib.packages.Attribute;
 import com.google.devtools.build.lib.packages.Rule;
 import com.google.devtools.build.lib.pkgcache.LoadingFailedException;
@@ -344,12 +343,12 @@ public class BuildViewTest extends BuildViewTestBase {
           Dependency.withTransitionAndAspects(
               Label.parseAbsolute("//package:inner"),
               Attribute.ConfigurationTransition.NONE,
-              ImmutableSet.<Aspect>of());
+              ImmutableSet.<AspectDescriptor>of());
       fileDependency =
           Dependency.withTransitionAndAspects(
               Label.parseAbsolute("//package:file"),
               Attribute.ConfigurationTransition.NONE,
-              ImmutableSet.<Aspect>of());
+              ImmutableSet.<AspectDescriptor>of());
     } else {
       innerDependency =
           Dependency.withConfiguration(
@@ -953,12 +952,12 @@ public class BuildViewTest extends BuildViewTestBase {
     update(eventBus, defaultFlags().with(Flag.KEEP_GOING),
         "//cycle:foo", "//cycle:bat", "//cycle:baz");
     assertContainsEvent("in cc_library rule //cycle:foo: cycle in dependency graph:");
-    assertContainsEvent(
-        "errors encountered while analyzing target '//cycle:foo': it will not be built");
     assertContainsEvent("in cc_library rule //cycle:bas: cycle in dependency graph:");
-    assertContainsEvent(
-        "errors encountered while analyzing target '//cycle:bat': it will not be built");
     if (defaultFlags().contains(Flag.SKYFRAME_LOADING_PHASE)) {
+      assertContainsEvent(
+          "errors encountered while analyzing target '//cycle:foo': it will not be built");
+      assertContainsEvent(
+          "errors encountered while analyzing target '//cycle:bat': it will not be built");
       // With interleaved loading and analysis, we can no longer distinguish loading-phase cycles
       // and analysis-phase cycles. This was previously reported as a loading-phase cycle, as it
       // happens with any configuration (cycle is hard-coded in the BUILD files). Also see the
@@ -967,6 +966,9 @@ public class BuildViewTest extends BuildViewTestBase {
           .containsExactly(
               Pair.of("//cycle:foo", "//cycle:foo"), Pair.of("//cycle:bat", "//cycle:bas"));
     } else {
+      assertContainsEvent("errors encountered while loading target '//cycle:foo'");
+      assertContainsEvent("errors encountered while loading target '//cycle:bat'");
+
       assertThat(Iterables.transform(loadingFailureRecorder.events,
           new Function<Pair<Label, Label>, Pair<String, String>>() {
             @Override

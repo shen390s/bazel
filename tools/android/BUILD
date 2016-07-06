@@ -1,6 +1,9 @@
 package(default_visibility = ["//visibility:public"])
 
-filegroup(name = "sdk")
+filegroup(
+    name = "sdk",
+    srcs = ["//external:android/sdk"],
+)
 
 android_library(
     name = "incremental_stub_application",
@@ -25,6 +28,12 @@ sh_binary(
 )
 
 sh_binary(
+    name = "resource_shrinker",
+    srcs = ["resource_shrinker.sh"],
+    data = ["//src/tools/android/java/com/google/devtools/build/android:ResourceShrinkerAction"],
+)
+
+sh_binary(
     name = "merge_dexzips",
     srcs = ["merge_dexzips.sh"],
     data = ["//src/tools/android/java/com/google/devtools/build/android/ziputils:reducer"],
@@ -34,6 +43,16 @@ sh_binary(
     name = "shuffle_jars",
     srcs = ["shuffle_jars.sh"],
     data = ["//src/tools/android/java/com/google/devtools/build/android/ziputils:mapper"],
+)
+
+sh_binary(
+    name = "dexbuilder",
+    srcs = ["fail.sh"],
+)
+
+sh_binary(
+    name = "dexmerger",
+    srcs = ["fail.sh"],
 )
 
 sh_binary(

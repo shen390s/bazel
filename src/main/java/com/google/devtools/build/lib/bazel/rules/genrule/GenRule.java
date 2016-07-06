@@ -16,6 +16,7 @@ package com.google.devtools.build.lib.bazel.rules.genrule;
 
 import static com.google.devtools.build.lib.analysis.RunfilesProvider.withData;
 
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
@@ -132,13 +133,13 @@ public class GenRule implements RuleConfiguredTargetFactory {
     ruleContext.registerAction(
         new GenRuleAction(
             ruleContext.getActionOwner(),
-            commandHelper.getResolvedTools(),
+            ImmutableList.copyOf(commandHelper.getResolvedTools()),
             inputs.build(),
             filesToBuild,
             argv,
             env,
             ImmutableMap.copyOf(executionInfo),
-            commandHelper.getRemoteRunfileManifestMap(),
+            ImmutableMap.copyOf(commandHelper.getRemoteRunfileManifestMap()),
             message + ' ' + ruleContext.getLabel()));
 
     RunfilesProvider runfilesProvider = withData(
@@ -148,7 +149,10 @@ public class GenRule implements RuleConfiguredTargetFactory {
         // No need to visit the dependencies of a genrule. They cross from the target into the host
         // configuration, because the dependencies of a genrule are always built for the host
         // configuration.
-        new Runfiles.Builder(ruleContext.getWorkspaceName()).addTransitiveArtifacts(filesToBuild)
+        new Runfiles.Builder(
+            ruleContext.getWorkspaceName(),
+            ruleContext.getConfiguration().legacyExternalRunfiles())
+            .addTransitiveArtifacts(filesToBuild)
             .build());
 
     return new RuleConfiguredTargetBuilder(ruleContext)

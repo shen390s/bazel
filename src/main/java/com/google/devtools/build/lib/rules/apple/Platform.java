@@ -15,6 +15,7 @@
 package com.google.devtools.build.lib.rules.apple;
 
 import com.google.common.collect.ImmutableSet;
+import com.google.devtools.build.lib.skylarkinterface.SkylarkModule;
 import com.google.devtools.build.lib.util.Preconditions;
 
 import java.util.Locale;
@@ -25,10 +26,15 @@ import javax.annotation.Nullable;
 /**
  * An enum that can be used to distinguish between various apple platforms.
  */
+@SkylarkModule(name = "platform", doc = "Distinguishes between various apple platforms.")
 public enum Platform {
   IOS_DEVICE("iPhoneOS"),
   IOS_SIMULATOR("iPhoneSimulator"),
-  MACOSX("MacOSX");
+  MACOS_X("MacOSX"),
+  TVOS_DEVICE("AppleTVOS"),
+  TVOS_SIMULATOR("AppleTVSimulator"),
+  WATCHOS_DEVICE("WatchOS"),
+  WATCHOS_SIMULATOR("WatchSimulator");
 
   private static final Set<String> IOS_SIMULATOR_ARCHS = ImmutableSet.of("i386", "x86_64");
   private static final Set<String> IOS_DEVICE_ARCHS =
@@ -89,7 +95,7 @@ public enum Platform {
     } else if (IOS_DEVICE_TARGET_CPUS.contains(targetCpu)) {
       return IOS_DEVICE;
     } else if (MACOSX_TARGET_CPUS.contains(targetCpu)) {
-      return MACOSX;
+      return MACOS_X;
     } else {
       return null;
     }

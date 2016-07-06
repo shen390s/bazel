@@ -20,12 +20,27 @@ import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
 import com.google.devtools.build.lib.bazel.repository.MavenConnector;
 
+import com.google.devtools.build.lib.events.Event;
+import com.google.devtools.build.lib.events.EventHandler;
+import org.apache.maven.model.Model;
 import org.apache.maven.model.Parent;
 import org.apache.maven.model.Repository;
+import org.apache.maven.model.building.DefaultModelBuilder;
+import org.apache.maven.model.building.DefaultModelBuilderFactory;
+import org.apache.maven.model.building.DefaultModelBuildingRequest;
+import org.apache.maven.model.building.FileModelSource;
+import org.apache.maven.model.building.ModelBuildingException;
+import org.apache.maven.model.building.ModelBuildingResult;
 import org.apache.maven.model.building.ModelSource;
 import org.apache.maven.model.building.UrlModelSource;
+import org.apache.maven.model.composition.DefaultDependencyManagementImporter;
+import org.apache.maven.model.management.DefaultDependencyManagementInjector;
+import org.apache.maven.model.management.DefaultPluginManagementInjector;
+import org.apache.maven.model.plugin.DefaultPluginConfigurationExpander;
+import org.apache.maven.model.profile.DefaultProfileSelector;
 import org.apache.maven.model.resolution.ModelResolver;
 import org.apache.maven.model.resolution.UnresolvableModelException;
+import org.eclipse.aether.artifact.Artifact;
 
 import java.io.IOException;
 import java.net.HttpURLConnection;
@@ -42,26 +57,39 @@ import java.util.Set;
 public class DefaultModelResolver implements ModelResolver {
 
   private final Set<Repository> repositories;
-  private final Map<String, ModelSource> artifactToUrl;
+  private final Map<String, ModelSource> ruleNameToModelSource;
+  private final DefaultModelBuilder modelBuilder;
 
   public DefaultModelResolver() {
     repositories = Sets.newHashSet();
     repositories.add(MavenConnector.getMavenCentral());
-    artifactToUrl = Maps.newHashMap();
+    ruleNameToModelSource = Maps.newHashMap();
+    modelBuilder = new DefaultModelBuilderFactory().newInstance()
+        .setProfileSelector(new DefaultProfileSelector())
+        .setPluginConfigurationExpander(new DefaultPluginConfigurationExpander())
+        .setPluginManagementInjector(new DefaultPluginManagementInjector())
+        .setDependencyManagementImporter(new DefaultDependencyManagementImporter())
+        .setDependencyManagementInjector(new DefaultDependencyManagementInjector());
   }
 
   private DefaultModelResolver(
-      Set<Repository> repositories, Map<String, ModelSource> artifactToRepository) {
+      Set<Repository> repositories, Map<String, ModelSource> ruleNameToModelSource,
+      DefaultModelBuilder modelBuilder) {
     this.repositories = repositories;
-    this.artifactToUrl = artifactToRepository;
+    this.ruleNameToModelSource = ruleNameToModelSource;
+    this.modelBuilder = modelBuilder;
   }
 
+  public ModelSource resolveModel(Artifact artifact) throws UnresolvableModelException {
+    return resolveModel(artifact.getGroupId(), artifact.getArtifactId(), artifact.getVersion());
+  }
+  
   @Override
   public ModelSource resolveModel(String groupId, String artifactId, String version)
       throws UnresolvableModelException {
-    String artifact = Rule.name(groupId, artifactId);
-    if (artifactToUrl.containsKey(artifact)) {
-      return artifactToUrl.get(artifact);
+    String ruleName = Rule.name(groupId, artifactId);
+    if (ruleNameToModelSource.containsKey(ruleName)) {
+      return ruleNameToModelSource.get(ruleName);
     }
     for (Repository repository : repositories) {
       UrlModelSource modelSource = getModelSource(
@@ -72,13 +100,13 @@ public class DefaultModelResolver implements ModelResolver {
     }
 
     // TODO(kchodorow): use Java 8 features to make this a one-liner.
-    List<String> urls = Lists.newArrayList();
+    List<String> attemptedUrls = Lists.newArrayList();
     for (Repository repository : repositories) {
-      urls.add(repository.getUrl());
+      attemptedUrls.add(repository.getUrl());
     }
     throw new UnresolvableModelException("Could not find any repositories that knew how to "
         + "resolve " + groupId + ":" + artifactId + ":" + version + " (checked "
-        + Joiner.on(", ").join(urls) + ")", groupId, artifactId, version);
+        + Joiner.on(", ").join(attemptedUrls) + ")", groupId, artifactId, version);
   }
 
   // TODO(kchodorow): make this work with local repositories.
@@ -94,7 +122,7 @@ public class DefaultModelResolver implements ModelResolver {
           + "-" + version + ".pom");
       if (pomFileExists(urlUrl)) {
         UrlModelSource urlModelSource = new UrlModelSource(urlUrl);
-        artifactToUrl.put(Rule.name(groupId, artifactId), urlModelSource);
+        ruleNameToModelSource.put(Rule.name(groupId, artifactId), urlModelSource);
         return urlModelSource;
       }
     } catch (MalformedURLException e) {
@@ -121,22 +149,26 @@ public class DefaultModelResolver implements ModelResolver {
     return false;
   }
 
+  // For compatibility with older versions of ModelResolver which don't have this method,
+  // don't add @Override.
   public ModelSource resolveModel(Parent parent) throws UnresolvableModelException {
     return resolveModel(parent.getGroupId(), parent.getArtifactId(), parent.getVersion());
   }
 
-  @Override
+  // For compatibility with older versions of ModelResolver which don't have this method,
+  // don't add @Override.
   public void addRepository(Repository repository) {
     repositories.add(repository);
   }
 
+  @Override
   public void addRepository(Repository repository, boolean replace) {
     addRepository(repository);
   }
 
   @Override
   public ModelResolver newCopy() {
-    return new DefaultModelResolver(repositories, artifactToUrl);
+    return new DefaultModelResolver(repositories, ruleNameToModelSource, modelBuilder);
   }
 
   /**
@@ -152,10 +184,44 @@ public class DefaultModelResolver implements ModelResolver {
 
   public boolean putModelSource(String groupId, String artifactId, ModelSource modelSource) {
     String key = Rule.name(groupId, artifactId);
-    if (!artifactToUrl.containsKey(key)) {
-      artifactToUrl.put(key, modelSource);
+    if (!ruleNameToModelSource.containsKey(key)) {
+      ruleNameToModelSource.put(key, modelSource);
       return true;
     }
     return false;
+  }
+
+  public Model getEffectiveModel(ModelSource modelSource, EventHandler handler) {
+    DefaultModelBuildingRequest request = new DefaultModelBuildingRequest();
+    request.setModelResolver(this);
+    request.setModelSource(modelSource);
+    Model model;
+    try {
+      ModelBuildingResult result = modelBuilder.build(request);
+      model = result.getEffectiveModel();
+    } catch (ModelBuildingException | IllegalArgumentException e) {
+      // IllegalArg can be thrown if the parent POM cannot be resolved.
+      handler.handle(Event.error("Unable to resolve Maven model from " + modelSource.getLocation()
+          + ": " + e.getMessage()));
+      return null;
+    }
+    return model;
+  }
+
+  public Model getRawModel(FileModelSource fileModelSource, EventHandler handler) {
+    DefaultModelBuildingRequest request = new DefaultModelBuildingRequest();
+    request.setModelResolver(this);
+    request.setModelSource(fileModelSource);
+    Model model;
+    try {
+      ModelBuildingResult result = modelBuilder.build(request);
+      model = result.getRawModel();
+    } catch (ModelBuildingException | IllegalArgumentException e) {
+      // IllegalArg can be thrown if the parent POM cannot be resolved.
+      handler.handle(Event.error("Unable to resolve raw Maven model from "
+          + fileModelSource.getLocation() + ": " + e.getMessage()));
+      return null;
+    }
+    return model;
   }
 }

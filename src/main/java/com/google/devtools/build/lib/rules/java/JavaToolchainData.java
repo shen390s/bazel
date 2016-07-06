@@ -13,6 +13,8 @@
 // limitations under the License.
 package com.google.devtools.build.lib.rules.java;
 
+import static com.google.devtools.build.lib.util.Preconditions.checkNotNull;
+
 import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableList.Builder;
@@ -28,20 +30,30 @@ import java.util.List;
  */
 @Immutable
 public class JavaToolchainData {
-  
+
   private final String sourceVersion;
   private final String targetVersion;
+  private final Iterable<String> bootclasspath;
+  private final Iterable<String> extclasspath;
   private final String encoding;
   private final ImmutableList<String> options;
   private final ImmutableList<String> jvmOpts;
 
-  public JavaToolchainData(String sourceVersion, String targetVersion, String encoding,
-      List<String> xlint, List<String> misc, List<String> jvmOpts) {
-    
-    this.sourceVersion = sourceVersion;
-    this.targetVersion = targetVersion;
-    this.encoding = encoding;
-    
+  public JavaToolchainData(
+      String sourceVersion,
+      String targetVersion,
+      Iterable<String> bootclasspath,
+      Iterable<String> extclasspath,
+      String encoding,
+      List<String> xlint,
+      List<String> misc,
+      List<String> jvmOpts) {
+    this.sourceVersion = checkNotNull(sourceVersion, "sourceVersion must not be null");
+    this.targetVersion = checkNotNull(targetVersion, "targetVersion must not be null");
+    this.bootclasspath = checkNotNull(bootclasspath, "bootclasspath must not be null");
+    this.extclasspath = checkNotNull(extclasspath, "extclasspath must not be null");
+    this.encoding = checkNotNull(encoding, "encoding must not be null");
+
     this.jvmOpts = ImmutableList.copyOf(jvmOpts);
     Builder<String> builder = ImmutableList.<String>builder();
     if (!sourceVersion.isEmpty()) {
@@ -79,6 +91,14 @@ public class JavaToolchainData {
 
   public String getTargetVersion() {
     return targetVersion;
+  }
+
+  public Iterable<String> getBootclasspath() {
+    return bootclasspath;
+  }
+
+  public Iterable<String> getExtclasspath() {
+    return extclasspath;
   }
 
   public String getEncoding() {

@@ -14,6 +14,7 @@
 
 package com.google.devtools.build.lib.bazel.repository;
 
+import com.google.devtools.build.lib.analysis.BlazeDirectories;
 import com.google.devtools.build.lib.analysis.RuleDefinition;
 import com.google.devtools.build.lib.bazel.rules.workspace.MavenServerRule;
 import com.google.devtools.build.lib.packages.Rule;
@@ -33,14 +34,15 @@ import javax.annotation.Nullable;
 public class MavenServerRepositoryFunction extends RepositoryFunction {
 
   @Override
-  public boolean isLocal() {
+  public boolean isLocal(Rule rule) {
     return true;
   }
 
   @Nullable
   @Override
-  public SkyValue fetch(Rule rule, Path outputDirectory, Environment env)
-      throws SkyFunctionException, InterruptedException {
+  public SkyValue fetch(
+      Rule rule, Path outputDirectory, BlazeDirectories directories, Environment env)
+          throws SkyFunctionException, InterruptedException {
     throw new RepositoryFunctionException(new EvalException(
         rule.getLocation(),
         "maven_server rule '" + rule.getName() + "' does not represent an actual repository"),

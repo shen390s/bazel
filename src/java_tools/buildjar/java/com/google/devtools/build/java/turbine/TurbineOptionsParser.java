@@ -33,19 +33,28 @@ import javax.annotation.Nullable;
 public class TurbineOptionsParser {
 
   /**
-   * Parses a list of command-line options into a {@link TurbineOptions}, expanding any
-   * {@code @params} files.
+   * Parses command line options into {@link TurbineOptions}, expanding any {@code @params}
+   * files.
    */
   public static TurbineOptions parse(Iterable<String> args) throws IOException {
-    Deque<String> argumentDeque = new ArrayDeque<>();
-    expandParamsFiles(argumentDeque, args);
     TurbineOptions.Builder builder = TurbineOptions.builder();
-    parse(builder, argumentDeque);
+    parse(builder, args);
     return builder.build();
   }
 
+  /**
+   * Parses command line options into a {@link TurbineOptions.Builder}, expanding any
+   * {@code @params} files.
+   */
+  public static void parse(TurbineOptions.Builder builder, Iterable<String> args)
+      throws IOException {
+    Deque<String> argumentDeque = new ArrayDeque<>();
+    expandParamsFiles(argumentDeque, args);
+    parse(builder, argumentDeque);
+  }
+
   private static final Splitter ARG_SPLITTER =
-      Splitter.on(CharMatcher.BREAKING_WHITESPACE).omitEmptyStrings().trimResults();
+      Splitter.on(CharMatcher.breakingWhitespace()).omitEmptyStrings().trimResults();
 
   /**
    * Pre-processes an argument list, expanding arguments of the form {@code @filename}
@@ -82,7 +91,7 @@ public class TurbineOptionsParser {
           builder.setTempDir(readOne(argumentDeque));
           break;
         case "--processors":
-          builder.setProcessors(readList(argumentDeque));
+          builder.addProcessors(readList(argumentDeque));
           break;
         case "--processorpath":
           builder.addProcessorPathEntries(splitClasspath(readOne(argumentDeque)));
@@ -123,7 +132,8 @@ public class TurbineOptionsParser {
           builder.setTargetLabel(readOne(argumentDeque));
           break;
         case "--strict_java_deps":
-          builder.setStrictJavaDeps(readOne(argumentDeque));
+          // TODO(cushon): remove once Blaze no longer passes this flag
+          readOne(argumentDeque); // ignored
           break;
         case "--rule_kind":
           builder.setRuleKind(readOne(argumentDeque));

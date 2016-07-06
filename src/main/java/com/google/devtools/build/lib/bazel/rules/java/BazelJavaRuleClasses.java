@@ -40,6 +40,7 @@ import com.google.devtools.build.lib.packages.RuleClass.Builder.RuleClassType;
 import com.google.devtools.build.lib.packages.RuleClass.PackageNameConstraint;
 import com.google.devtools.build.lib.packages.TriState;
 import com.google.devtools.build.lib.rules.java.JavaSemantics;
+import com.google.devtools.build.lib.rules.java.JavaToolchainProvider;
 import com.google.devtools.build.lib.syntax.Type;
 import com.google.devtools.build.lib.util.FileTypeSet;
 
@@ -74,7 +75,10 @@ public class BazelJavaRuleClasses {
     @Override
     public RuleClass build(Builder builder, RuleDefinitionEnvironment env) {
       return builder
-          .add(attr("$ijar", LABEL).cfg(HOST).exec().value(env.getLabel("//tools/defaults:ijar")))
+          .add(
+              attr(":java_toolchain", LABEL)
+                  .mandatoryNativeProviders(JavaToolchainProvider.class)
+                  .value(JavaSemantics.JAVA_TOOLCHAIN))
           .setPreferredDependencyPredicate(JavaSemantics.JAVA_SOURCE)
           .build();
     }
@@ -98,19 +102,7 @@ public class BazelJavaRuleClasses {
       return builder
           .add(attr(":jvm", LABEL).cfg(HOST).value(JavaSemantics.JVM))
           .add(attr(":host_jdk", LABEL).cfg(HOST).value(JavaSemantics.HOST_JDK))
-          .add(attr(":java_toolchain", LABEL).value(JavaSemantics.JAVA_TOOLCHAIN))
-          .add(attr("$javac_extdir", LABEL).cfg(HOST)
-              .value(env.getLabel(JavaSemantics.JAVAC_EXTDIR_LABEL)))
-          .add(attr("$java_langtools", LABEL).cfg(HOST)
-              .value(env.getLabel("//tools/defaults:java_langtools")))
-          .add(attr("$javac_bootclasspath", LABEL).cfg(HOST)
-              .value(env.getLabel(JavaSemantics.JAVAC_BOOTCLASSPATH_LABEL)))
-          .add(attr("$javabuilder", LABEL).cfg(HOST)
-              .value(env.getLabel(JavaSemantics.JAVABUILDER_LABEL)))
-          .add(attr("$singlejar", LABEL).cfg(HOST)
-              .value(env.getLabel(JavaSemantics.SINGLEJAR_LABEL)))
-          .add(attr("$genclass", LABEL).cfg(HOST)
-              .value(env.getLabel(JavaSemantics.GENCLASS_LABEL)))
+          .add(attr("$jacoco_instrumentation", LABEL).cfg(HOST))
           .build();
     }
 
@@ -327,9 +319,12 @@ public class BazelJavaRuleClasses {
           <!-- #END_BLAZE_RULE.ATTRIBUTE --> */
           .add(attr("main_class", STRING))
           /* <!-- #BLAZE_RULE($base_java_binary).ATTRIBUTE(create_executable) -->
-          Whether to build the executable wrapper script or not.
-          If this option is present, no executable wrapper script is built around the
-          <code>.jar</code> file. Incompatible with <code>main_class</code> attribute.
+          Whether the binary is executable. Non-executable binaries collect transitive
+          runtime Java dependencies into a deploy jar, but cannot be executed directly.
+
+          No wrapper script is created if this attribute is set. It is an error to set
+          this to 0 if the <code>launcher</code> or <code>main_class</code> attributes
+          are set.
           <!-- #END_BLAZE_RULE.ATTRIBUTE --> */
           .add(attr("create_executable", BOOLEAN)
               .nonconfigurable("internal")
@@ -364,6 +359,31 @@ public class BazelJavaRuleClasses {
           <!-- #END_BLAZE_RULE.ATTRIBUTE --> */
           // TODO(bazel-team): describe how to access this data at runtime
           .add(attr("stamp", TRISTATE).value(TriState.AUTO))
+          /* <!-- #BLAZE_RULE($base_java_binary).ATTRIBUTE(launcher) -->
+          If specified, the target will be used to launch the Java Virtual Machine in
+          the wrapper shell script. The target must be a <code>cc_binary</code>.
+          Any <code>cc_binary</code> that implements the
+          <a href="http://docs.oracle.com/javase/7/docs/technotes/guides/jni/spec/invocation.html">
+          Java Invocation API</a> can be a launcher target.
+
+          <p>The related <a href="../blaze-user-manual.html#flag--java_launcher"><code>
+          --java_launcher</code></a> Bazel flag affects only those
+          <code>java_binary</code> and <code>java_test</code> targets that have
+          <i>not</i> specified a <code>launcher</code> attribute. For those targets
+          that must always be run with the JDK's "java" launcher, set their
+          <code>launcher</code> attribute to the special opt-out label
+          <code>//third_party/java/jdk:jdk_launcher</code>.</p>
+
+          <p>If you build a deploy jar and specify a launcher target through either
+          this <code>launcher</code> attribute or <code>--java_launcher</code> Bazel
+          flag, then the deploy jar will be a single file that is both (a) a .jar
+          file that contains the appropriate classes, and (b) the executable
+          specified by the launcher target. (This does not apply to the opt-out
+          label.)</p>
+          <!-- #END_BLAZE_RULE.ATTRIBUTE --> */
+          .add(attr("launcher", LABEL)
+              .allowedFileTypes(FileTypeSet.NO_FILE)
+              .allowedRuleClasses("cc_binary"))
           .add(attr(":java_launcher", LABEL).value(JavaSemantics.JAVA_LAUNCHER))  // blaze flag
           .build();
     }

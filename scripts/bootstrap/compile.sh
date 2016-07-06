@@ -17,8 +17,9 @@
 # Script for building bazel from scratch without bazel
 
 PROTO_FILES=$(ls src/main/protobuf/*.proto)
-LIBRARY_JARS=$(find third_party -name '*.jar' | tr "\n" " ")
+LIBRARY_JARS=$(find third_party -name '*.jar' | grep -Fv /javac.jar | grep -Fv /javac7.jar | grep -Fv JavaBuilder | tr "\n" " ")
 DIRS=$(echo src/{java_tools/singlejar/java/com/google/devtools/build/zip,main/java,tools/xcode-common/java/com/google/devtools/build/xcode/{common,util}} ${OUTPUT_DIR}/src)
+EXCLUDE_FILES=src/main/java/com/google/devtools/build/lib/server/GrpcServerImpl.java
 
 mkdir -p ${OUTPUT_DIR}/classes
 mkdir -p ${OUTPUT_DIR}/src
@@ -102,8 +103,9 @@ JAR="${JAVA_HOME}/bin/jar"
 function java_compilation() {
   local name=$1
   local directories=$2
-  local library_jars=$3
-  local output=$4
+  local excludes=$3
+  local library_jars=$4
+  local output=$5
 
   local classpath=${library_jars// /$PATHSEP}:$5
   local sourcepath=${directories// /$PATHSEP}
@@ -111,13 +113,22 @@ function java_compilation() {
   tempdir
   local tmp="${NEW_TMPDIR}"
   local paramfile="${tmp}/param"
+  local filelist="${tmp}/filelist"
+  local excludefile="${tmp}/excludefile"
   touch $paramfile
 
   mkdir -p "${output}/classes"
 
   # Compile .java files (incl. generated ones) using javac
   log "Compiling $name code..."
-  find ${directories} -name "*.java" > "$paramfile"
+  find ${directories} -name "*.java" | sort > "$filelist"
+  # Quotes around $excludes intentionally omitted in the for statement so that
+  # it's split on spaces
+  (for i in $excludes; do
+    echo $i
+  done) | sort > "$excludefile"
+
+  comm -23 "$filelist" "$excludefile" > "$paramfile"
 
   if [ ! -z "$BAZEL_DEBUG_JAVA_COMPILATION" ]; then
     echo "directories=${directories}" >&2
@@ -129,13 +140,13 @@ function java_compilation() {
     cat "$paramfile" >&2
   fi
 
-  run_silent "${JAVAC}" -classpath "${classpath}" -sourcepath "${sourcepath}" \
+  run "${JAVAC}" -classpath "${classpath}" -sourcepath "${sourcepath}" \
       -d "${output}/classes" -source "$JAVA_VERSION" -target "$JAVA_VERSION" \
       -encoding UTF-8 "@${paramfile}"
 
   log "Extracting helper classes for $name..."
   for f in ${library_jars} ; do
-    run_silent unzip -qn ${f} -d "${output}/classes"
+    run unzip -qn ${f} -d "${output}/classes"
   done
 }
 
@@ -155,16 +166,16 @@ function create_deploy_jar() {
 
   log "Creating $name.jar..."
   echo "Main-Class: $mainClass" > $output/MANIFEST.MF
-  run_silent "$JAR" cmf $output/MANIFEST.MF $output/$name.jar $packages "$@"
+  run "$JAR" cmf $output/MANIFEST.MF $output/$name.jar $packages "$@"
 }
 
 if [ -z "${BAZEL_SKIP_JAVA_COMPILATION}" ]; then
   log "Compiling Java stubs for protocol buffers..."
   for f in $PROTO_FILES ; do
-    run_silent "${PROTOC}" -Isrc/main/protobuf/ --java_out=${OUTPUT_DIR}/src "$f"
+    run "${PROTOC}" -Isrc/main/protobuf/ --java_out=${OUTPUT_DIR}/src "$f"
   done
 
-  java_compilation "Bazel Java" "$DIRS" "$LIBRARY_JARS" "${OUTPUT_DIR}"
+  java_compilation "Bazel Java" "$DIRS" "$EXCLUDE_FILES" "$LIBRARY_JARS" "${OUTPUT_DIR}"
 
   # help files: all non java and BUILD files in src/main/java.
   for i in $(find src/main/java -type f -a \! -name '*.java' -a \! -name 'BUILD' | sed 's|src/main/java/||'); do
@@ -173,8 +184,10 @@ if [ -z "${BAZEL_SKIP_JAVA_COMPILATION}" ]; then
   done
 
   # Overwrite tools.WORKSPACE, this is only for the bootstrap binary
-  echo "local_repository(name = 'bazel_tools', path = __workspace_dir__)" \
-       > ${OUTPUT_DIR}/classes/com/google/devtools/build/lib/bazel/rules/tools.WORKSPACE
+  cat <<EOF >${OUTPUT_DIR}/classes/com/google/devtools/build/lib/bazel/rules/tools.WORKSPACE
+local_repository(name = 'bazel_tools', path = __workspace_dir__)
+bind(name = "cc_toolchain", actual = "@bazel_tools//tools/cpp:default-toolchain")
+EOF
 
   create_deploy_jar "libblaze" "com.google.devtools.build.lib.bazel.BazelMain" \
       ${OUTPUT_DIR}
@@ -187,6 +200,11 @@ mkdir -p ${ARCHIVE_DIR}/_embedded_binaries
 # Dummy build-runfiles
 cat <<'EOF' >${ARCHIVE_DIR}/_embedded_binaries/build-runfiles${EXE_EXT}
 #!/bin/bash
+win_arg='--windows_compatible'
+if [ $1 == $win_arg ];
+then
+     shift
+fi
 mkdir -p $2/MANIFEST
 cp $1 $2/MANIFEST
 EOF
@@ -201,7 +219,29 @@ stdout="$1"
 stderr="$2"
 shift 2
 
-"$@" 2>"$stderr" >"$stdout"
+if [ "$stdout" = "-" ]
+then
+  if [ "$stderr" = "-" ]
+  then
+    "$@"
+    exit $?
+  else
+    "$@" 2>"$stderr"
+    exit $?
+  fi
+else
+  if [ "$stderr" = "-" ]
+  then
+    "$@" >"$stdout"
+    exit $?
+  else
+    "$@" 2>"$stderr" >"$stdout"
+    exit $?
+  fi
+fi
+
+
+"$@"
 exit $?
 EOF
 chmod 0755 ${ARCHIVE_DIR}/_embedded_binaries/process-wrapper${EXE_EXT}
@@ -228,7 +268,7 @@ function bootstrap_build() {
       build \
       --ignore_unsupported_sandboxing \
       --startup_time=329 --extract_data_time=523 \
-      --rc_source=/dev/null --isatty=1 --terminal_columns=97 \
+      --rc_source=/dev/null --isatty=1 \
       --ignore_client_env \
       --client_cwd=${PWD} \
       "${@}"

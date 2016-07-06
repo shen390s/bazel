@@ -1,3 +1,165 @@
+## Release 0.2.3 (2016-05-10)
+
+```
+Baseline: 5a2dd7a
+```
+
+Incompatible changes:
+
+  - All repositories are now directly under the x.runfiles directory
+    in the runfiles tree (previously, external repositories were at
+    x.runfiles/main-repo/external/other-repo. This simplifies
+    handling remote repository runfiles considerably, but will break
+    existing references to external repository runfiles.
+    Furthermore, if a Bazel project does not provide a workspace name
+    in the WORKSPACE file, Bazel will now default to using __main__
+    as the workspace name (instead of "", as previously). The
+    repository's runfiles will appear under x.runfiles/__main__/.
+  - Bazel does not embed protocol buffer-related rules anymore.
+  - It is now an error for a cc rule's includes attribute to point to
+    the workspace root.
+  - Bazel warns if a cc rule's includes attribute points out of
+    third_party.
+  - Removed cc_* attributes: abi / abi_deps. Use select() instead.
+
+New features:
+
+  - select({"//some:condition": None }) is now possible (this "unsets"
+    the attribute).
+
+Important changes:
+
+  - java_import now allows its 'jars' attribute to be empty.
+  - adds crunch_png attribute to android_binary
+  - Replace --java_langtools, --javabuilder_top, --singlejar_top,
+    --genclass_top, and --ijar_top with
+    java_toolchain.{javac,javabuilder,singlejar,genclass,ijar}
+  - External repository correctness fix: adding a new file/directory
+    as a child of a new_local_repository is now noticed.
+  - iOS apps are signed with get-task-allow=1 unless building with -c
+    opt.
+  - Generate debug symbols (-g) is enabled for all dbg builds of
+    objc_ rules.
+  - Bazel's workspace name is now io_bazel. If you are using Bazel's
+    source as an external repository, then you may want to update the
+    name you're referring to it as or you'll begin seeing warnings
+    about name mismatches in your code.
+  - Fixes integer overflow in J2ObjC sources to be Java-compatible.
+  - A FlagPolicy specified via the --invocation_policy flag will now
+    match the current command if any of its commands matches any of
+    the commands the current command inherits from, as opposed to
+    just the current command.
+  - The key for the map to cc_toolchain_suite.toolchains is now a
+    string of the form "cpu|compiler" (previously, it was just "cpu").
+  - Fix interaction between LIPO builds and C++ header modules.
+  - Ctrl-C will now interrupt a download, instead of waiting for it to
+    finish.
+  - Proxy settings can now be specified in http_proxy and https_proxy
+    environment variables (not just HTTP_PROXY and HTTPS_PROXY).
+  - Skylark targets can now read include directories from
+    ObjcProvider.
+  - Expose parameterized aspects to Skylark.
+  - Support alwayslink cc_library dependencies in objc binaries.
+  - Import cc_library dependencies in generated Xcode project.
+
+## Release 0.2.2b (2016-04-22)
+
+```
+Baseline: 759bbfe
+
+Cherry picks:
+   + 1250fda: Rollback of commit
+              351475627b9e94e5afdf472cbf465f49c433a25e.
+   + ba8700e: Correctly set up build variables for the correct pic
+              mode for fake_binary rules.
+   + 386f242: Automated [] rollback of commit
+              525fa71b0d6f096e9bfb180f688a4418c4974eb4.
+   + 97e5ab0: Fix cc_configure include path for Frameworks on OS X.
+   + a20352e: cc_configure: always add -B/usr/bin to the list of gcc
+              option
+   + 0b26f44: cc_configure: Add piii to the list of supported
+              cpu_value
+   + 3e4e416: cc_configure: uses which on the CC environment variable
+   + aa3dbd3: cc_configure.bzl: strip end of line when looking for
+              the cpu
+   + 810d60a: cc_configure: Add -B to compiler flag too
+```
+
+Patch release, only includes fixes to C++ auto-configuration.
+
+## Release 0.2.1 (2016-03-21)
+
+```
+Baseline: 19b5675
+```
+
+Incompatible changes:
+
+  - Skylark rules that are available from their own repository will
+    now issue a warning when accessed through @bazel_tools.
+  - Set --legacy_bazel_java_test to off by default. java_test will
+    now have a slightly different behaviour, correctly emitting XML
+    file but, as a downside, it needs correct declaration of the
+    test suite (see https://github.com/bazelbuild/bazel/issues/1017).
+  - Labels in .bzl files in remote repositories will be resolved
+    relative to their repository (instead of the repository the
+    Skylark rule is used in).
+  - Renamed proto_java_library to java_proto_library.  The former
+    is now deprecated and will print out a warning when used.
+  - android_sdk now compiles android_jack on the fly from
+    android_jar, which means android_jar must be a jar and
+    android_jack is now deprecated. The Jack tools (jack, jill,
+    resource_extractor) must be specified.
+  - Any project that depended on the objc_options rule will be
+    broken. Can be fixed by adding attrs (infoplists,copts) directly
+    to rules depending on the options.
+  - .aidl files correctly require import statements for types
+    defined in the same package and the same android_library.
+
+New features:
+
+  - Experimental Windows support is available.
+  - Experimental support for writing remote repository rules in
+    Skylark is available.
+  - iOS ipa_post_processor attribute allows for user-defined IPA
+    edits.
+  - Adds a to_json method to Skylark structs, providing conversion to
+    JSON format.
+  - Native python rule can depend on skylark rule as long as skylark
+    rule provides 'py' provider.
+  - When using both --verbose_failures and --sandbox_debug, Bazel
+    prints instructions how to spawn a debugging shell inside the
+    sandbox.
+  - add flag --sandbox_add_path, which takes a list of additional
+    paths as argument and mount these paths to sandbox.
+
+Important changes:
+
+  - @androidsdk//:org_apache_http_legacy added for the legacy Apache
+    classes for android sdk version 23 and above.
+  - Genrules correctly work when used with bazel run.
+  - When namespace-sandbox is run with the -D (debug) flag and
+    inside a terminal, it spawns a shell inside the sandbox to aid in
+    debugging when the sandboxed command fails.
+  - Added --artifact to workspace generator for generating workspace
+    and build file rules from artifact coodrinates.
+  - Specifying --experimental_android_resource_shrinking on the
+    command line will enable a resource shrinking pass on
+    android_binary targets that already use Proguard.
+  - J2ObjC updated to 1.0.1 release.
+  - Added "root_symlinks" and "symlinks" parameters to Skylark
+    runfiles() method.
+  - You can no longer use objc_binary targets for the xctest_app
+    attribute of an ios_test rule.
+  - Enable overriding jsonnet binaries and stdlib for Jsonnet rules.
+  - mount target of /etc/resolv.conf if it is a symlink.
+  - Tests that failed to build because execution was halted no longer
+    print their status.
+  - Bazel warns if a cc rule's includes attribute contains up-level
+    references that escape its package.
+  - Add repository_ctx.download and repository_ctx.download_and_extract
+    function.
+
 ## Release 0.2.0 (2016-02-18)
 
 ```

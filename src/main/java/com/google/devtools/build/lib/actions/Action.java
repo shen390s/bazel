@@ -26,11 +26,58 @@ import java.util.Collection;
 import javax.annotation.Nullable;
 
 /**
- * An Action represents a function from Artifacts to Artifacts executed as an
- * atomic build step.  Examples include compilation of a single C++ source
- * file, or linking a single library.
+ * An Action represents a function from Artifacts to Artifacts executed as an atomic build step.
+ * Examples include compilation of a single C++ source file, or linking a single library.
+ *
+ * <p>All subclasses of Action need to follow a strict set of invariants to ensure correctness on
+ * incremental builds. In our experience, getting this wrong is a lot more expensive than any
+ * benefits it might entail.
+ *
+ * <p>Use {@link com.google.devtools.build.lib.analysis.actions.SpawnAction} or {@link
+ * com.google.devtools.build.lib.analysis.actions.FileWriteAction} where possible, and avoid writing
+ * a new custom subclass.
+ *
+ * <p>These are the most important requirements for subclasses:
+ * <ul>
+ *   <li>Actions must be generally immutable; we currently make an exception for C++, and that has
+ *       been a constant source of correctness issues; there are still ongoing incremental
+ *       correctness issues for C++ compilations, despite several rounds of fixes and even though
+ *       this is the oldest part of the code base.
+ *   <li>Actions should be as lazy as possible - storing full lists of inputs or full command lines
+ *       in every action generally results in quadratic memory consumption. Use {@link
+ *       com.google.devtools.build.lib.collect.nestedset.NestedSet} for inputs, and {@link
+ *       com.google.devtools.build.lib.analysis.actions.CustomCommandLine} for command lines where
+ *       possible to share as much data between the different actions and their owning configured
+ *       targets.
+ *   <li>However, actions must not reference configured targets or rule contexts themselves; only
+ *       reference the necessary underlying artifacts or strings, preferably as nested sets. Bazel
+ *       may attempt to garbage collect configured targets and rule contexts before execution to
+ *       keep memory consumption down, and referencing them prevents that.
+ *   <li>In particular, avoid anonymous inner classes - when created in a non-static method, they
+ *       implicitly keep a reference to their enclosing class, even if that reference is unnecessary
+ *       for correct operation. Not doing so has caused significant increases in memory consumption
+ *       in the past.
+ *   <li>Correct cache key computation in {@link #getKey} is critical for the correctness of
+ *       incremental builds; you may be tempted to intentionally exclude data from the cache key,
+ *       but be aware that every time we've done that, it later resulted in expensive debugging
+ *       sessions and bug fixes.
+ *   <li>As much as possible, make the cache key computation obvious - fully hash every field
+ *       (except inputs and outputs) in the class, and avoid referencing anything that isn't needed
+ *       for action execution, such as {@link
+ *       com.google.devtools.build.lib.analysis.config.BuildConfiguration} objects or even fragments
+ *       thereof; if the action has a command line, err on the side of hashing the entire command
+ *       line, even if that seems expensive. It's always safe to hash too much - the negative effect
+ *       on incremental build times is usually negligible.
+ *   <li>Add test coverage for the cache key computation; use {@link
+ *       com.google.devtools.build.lib.analysis.util.ActionTester} to generate as many combinations
+ *       of field values as possible; add test coverage every time you add another field.
+ * </ul>
+ *
+ * <p>These constraints are not easily enforced or tested for (e.g., ActionTester only checks that a
+ * known set of fields is covered, not that all fields are covered), so carefully check all changes
+ * to action subclasses.
  */
-public interface Action extends ActionMetadata, Describable {
+public interface Action extends ActionExecutionMetadata, Describable {
 
   /**
    * Prepares for executing this action; called by the Builder prior to
@@ -145,17 +192,15 @@ public interface Action extends ActionMetadata, Describable {
   @Nullable ResourceSet estimateResourceConsumption(Executor executor);
 
   /**
-   * @return true iff path prefix conflict (conflict where two actions generate
-   *         two output artifacts with one of the artifact's path being the
-   *         prefix for another) between this action and another action should
-   *         be reported.
-   */
-  boolean shouldReportPathPrefixConflict(Action action);
-
-  /**
    * Returns true if the output should bypass output filtering. This is used for test actions.
    */
   boolean showsOutputUnconditionally();
+
+  /**
+   * Returns true if an {@link com.google.devtools.build.lib.rules.extra.ExtraAction} action can be
+   * attached to this action. If not, extra actions should not be attached to this action.
+   */
+  boolean extraActionCanAttach();
 
   /**
    * Called by {@link com.google.devtools.build.lib.rules.extra.ExtraAction} at execution time to
@@ -165,38 +210,4 @@ public interface Action extends ActionMetadata, Describable {
    * a different thread than the one this action is executed on.
    */
   ExtraActionInfo.Builder getExtraActionInfo();
-
-  /**
-   * Returns the action type. Must not be {@code null}.
-   */
-  MiddlemanType getActionType();
-
-  /**
-   * The action type.
-   */
-  public enum MiddlemanType {
-
-    /** A normal action. */
-    NORMAL,
-
-    /** A normal middleman, which just encapsulates a list of artifacts. */
-    AGGREGATING_MIDDLEMAN,
-
-    /**
-     * A middleman that enforces action ordering, is not validated by the dependency checker, but
-     * allows errors to be propagated.
-     */
-    ERROR_PROPAGATING_MIDDLEMAN,
-
-    /**
-     * A runfiles middleman, which is validated by the dependency checker, but is not expanded
-     * in blaze. Instead, the runfiles manifest is sent to remote execution client, which
-     * performs the expansion.
-     */
-    RUNFILES_MIDDLEMAN;
-
-    public boolean isMiddleman() {
-      return this != NORMAL;
-    }
-  }
 }

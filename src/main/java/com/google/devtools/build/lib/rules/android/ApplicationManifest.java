@@ -32,6 +32,9 @@ import com.google.devtools.build.lib.syntax.Type;
 import com.google.devtools.build.lib.vfs.PathFragment;
 
 import java.util.List;
+import java.util.Map;
+
+import javax.annotation.Nullable;
 
 /** Represents a AndroidManifest, that may have been merged from dependencies. */
 public final class ApplicationManifest {
@@ -78,6 +81,13 @@ public final class ApplicationManifest {
   private String getOverridePackage(RuleContext ruleContext) {
     // It seems that we sometimes rename the app for God-knows-what reason. If that is the case,
     // pass this information to the stubifier script.
+    if (ruleContext.attributes().isAttributeValueExplicitlySpecified("manifest_values")) {
+      Map<String, String> manifestValues =
+          ruleContext.attributes().get("manifest_values", Type.STRING_DICT);
+      if (manifestValues.containsKey("applicationId")) {
+        return manifestValues.get("applicationId");
+      }
+    }
     if (ruleContext.attributes().isAttributeValueExplicitlySpecified("application_id")) {
       return ruleContext.attributes().get("application_id", Type.STRING);
     }
@@ -163,7 +173,7 @@ public final class ApplicationManifest {
 
   public ApplicationManifest mergeWith(RuleContext ruleContext,
       ResourceDependencies resourceDeps) {
-    Iterable<Artifact> mergeeManifests = getMergeeManifests(resourceDeps.getResources()); 
+    Iterable<Artifact> mergeeManifests = getMergeeManifests(resourceDeps.getResources());
     if (!Iterables.isEmpty(mergeeManifests)) {
       Iterable<Artifact> exportedManifests = mergeeManifests;
       Artifact outputManifest = ruleContext.getUniqueDirectoryArtifact(
@@ -188,7 +198,7 @@ public final class ApplicationManifest {
     return builder.build();
   }
 
-  /** Packages up the manifest with assets from the rule and dependent resources. 
+  /** Packages up the manifest with assets from the rule and dependent resources.
    * @throws InterruptedException */
   public ResourceApk packWithAssets(
       Artifact resourceApk,
@@ -200,7 +210,7 @@ public final class ApplicationManifest {
     LocalResourceContainer data = new LocalResourceContainer.Builder(ruleContext)
         .withAssets(
             AndroidCommon.getAssetDir(ruleContext),
-            ruleContext.getPrerequisites(
+            ruleContext.getPrerequisitesIf(
                 // TODO(bazel-team): Remove the ResourceType construct.
                 ResourceType.ASSETS.getAttribute(),
                 Mode.TARGET,
@@ -208,43 +218,49 @@ public final class ApplicationManifest {
 
     return createApk(resourceApk,
         ruleContext,
+        false, /* isLibrary */
         resourceDeps,
         rTxt,
-        null, /* configurationFilters */
+        null, /* symbolsTxt */
+        ImmutableList.<String>of(), /* configurationFilters */
         ImmutableList.<String>of(), /* uncompressedExtensions */
+        true, /* crunchPng */
         ImmutableList.<String>of(), /* densities */
-        ImmutableList.<String>of(), /* String applicationId */
+        null, /* String applicationId */
         null, /* String versionCode */
         null, /* String versionName */
-        null, /* Artifact symbolsTxt */
         incremental,
         data,
         proguardCfg,
-        null);
+        null, /* Artifact mainDexProguardCfg */
+        null, /* Artifact manifestOut */
+        null /* Artifact mergedResources */);
   }
 
-  /** Packages up the manifest with resource and assets from the rule and dependent resources. 
-   * @param manifestOut TODO(corysmith):
-   * @throws InterruptedException */
+  /** Packages up the manifest with resource and assets from the rule and dependent resources. */
   public ResourceApk packWithDataAndResources(
-      Artifact resourceApk,
+      @Nullable Artifact resourceApk,
       RuleContext ruleContext,
+      boolean isLibrary,
       ResourceDependencies resourceDeps,
       Artifact rTxt,
       Artifact symbolsTxt,
       List<String> configurationFilters,
       List<String> uncompressedExtensions,
+      boolean crunchPng,
       List<String> densities,
       String applicationId,
       String versionCode,
       String versionName,
       boolean incremental,
       Artifact proguardCfg,
-      Artifact manifestOut) throws InterruptedException {
+      @Nullable Artifact mainDexProguardCfg,
+      Artifact manifestOut,
+      Artifact mergedResources) throws InterruptedException {
     LocalResourceContainer data = new LocalResourceContainer.Builder(ruleContext)
         .withAssets(
             AndroidCommon.getAssetDir(ruleContext),
-            ruleContext.getPrerequisites(
+            ruleContext.getPrerequisitesIf(
                 // TODO(bazel-team): Remove the ResourceType construct.
                 ResourceType.ASSETS.getAttribute(),
                 Mode.TARGET,
@@ -259,11 +275,13 @@ public final class ApplicationManifest {
     }
     return createApk(resourceApk,
         ruleContext,
+        isLibrary,
         resourceDeps,
         rTxt,
         symbolsTxt,
         configurationFilters,
         uncompressedExtensions,
+        crunchPng,
         densities,
         applicationId,
         versionCode,
@@ -271,16 +289,21 @@ public final class ApplicationManifest {
         incremental,
         data,
         proguardCfg,
-        manifestOut);
+        mainDexProguardCfg,
+        manifestOut,
+        mergedResources);
   }
 
-  private ResourceApk createApk(Artifact resourceApk,
+  private ResourceApk createApk(
+      @Nullable Artifact resourceApk,
       RuleContext ruleContext,
+      boolean isLibrary,
       ResourceDependencies resourceDeps,
       Artifact rTxt,
       Artifact symbolsTxt,
       List<String> configurationFilters,
       List<String> uncompressedExtensions,
+      boolean crunchPng,
       List<String> densities,
       String applicationId,
       String versionCode,
@@ -288,7 +311,9 @@ public final class ApplicationManifest {
       boolean incremental,
       LocalResourceContainer data,
       Artifact proguardCfg,
-      Artifact manifestOut) throws InterruptedException {
+      @Nullable Artifact mainDexProguardCfg,
+      Artifact manifestOut,
+      Artifact mergedResources) throws InterruptedException {
     ResourceContainer resourceContainer = checkForInlinedResources(
         new AndroidResourceContainerBuilder()
             .withData(data)
@@ -307,16 +332,20 @@ public final class ApplicationManifest {
 
     AndroidResourcesProcessorBuilder builder =
         new AndroidResourcesProcessorBuilder(ruleContext)
+            .setLibrary(isLibrary)
             .setApkOut(resourceContainer.getApk())
             .setConfigurationFilters(configurationFilters)
             .setUncompressedExtensions(uncompressedExtensions)
+            .setCrunchPng(crunchPng)
             .setJavaPackage(resourceContainer.getJavaPackage())
             .setDebug(ruleContext.getConfiguration().getCompilationMode() != CompilationMode.OPT)
             .setManifestOut(manifestOut)
+            .setMergedResourcesOut(mergedResources)
             .withPrimary(resourceContainer)
             .withDependencies(resourceDeps)
             .setDensities(densities)
             .setProguardOut(proguardCfg)
+            .setMainDexProguardOut(mainDexProguardCfg)
             .setApplicationId(applicationId)
             .setVersionCode(versionCode)
             .setVersionName(versionName);
@@ -331,8 +360,8 @@ public final class ApplicationManifest {
     ResourceContainer processed = builder.build(ruleContext);
 
     return new ResourceApk(
-        resourceApk, processed.getJavaSourceJar(), resourceDeps, processed, manifest,
-        proguardCfg, false);
+        resourceApk, processed.getJavaSourceJar(), resourceDeps, processed, processed.getManifest(),
+        proguardCfg, mainDexProguardCfg, false);
   }
 
   private static ResourceContainer checkForInlinedResources(ResourceContainer resourceContainer,
@@ -352,14 +381,16 @@ public final class ApplicationManifest {
   }
 
   /** Uses the resource apk from the resources attribute, as opposed to recompiling. */
-  public ResourceApk useCurrentResources(RuleContext ruleContext, Artifact proguardCfg) {
+  public ResourceApk useCurrentResources(
+      RuleContext ruleContext, Artifact proguardCfg, @Nullable Artifact mainDexProguardCfg) {
     ResourceContainer resourceContainer = Iterables.getOnlyElement(
         AndroidCommon.getAndroidResources(ruleContext).getDirectAndroidResources());
 
     new AndroidAaptActionHelper(
         ruleContext,
         resourceContainer.getManifest(),
-        Lists.newArrayList(resourceContainer)).createGenerateProguardAction(proguardCfg);
+        Lists.newArrayList(resourceContainer))
+        .createGenerateProguardAction(proguardCfg, mainDexProguardCfg);
 
     return new ResourceApk(
         resourceContainer.getApk(),
@@ -368,12 +399,13 @@ public final class ApplicationManifest {
         resourceContainer,
         manifest,
         proguardCfg,
+        mainDexProguardCfg,
         false);
   }
 
   /**
    * Packages up the manifest with resources, and generates the R.java.
-   * @throws InterruptedException 
+   * @throws InterruptedException
    *
    * @deprecated in favor of {@link ApplicationManifest#packWithDataAndResources}.
    */
@@ -383,7 +415,8 @@ public final class ApplicationManifest {
       RuleContext ruleContext,
       ResourceDependencies resourceDeps,
       boolean createSource,
-      Artifact proguardCfg) throws InterruptedException {
+      Artifact proguardCfg,
+      @Nullable Artifact mainDexProguardCfg) throws InterruptedException {
 
     TransitiveInfoCollection resourcesPrerequisite =
         ruleContext.getPrerequisite("resources", Mode.TARGET);
@@ -455,10 +488,10 @@ public final class ApplicationManifest {
         resourceContainer.isManifestExported(),
         resourceContainer.getRTxt(), null);
 
-    aaptActionHelper.createGenerateProguardAction(proguardCfg);
+    aaptActionHelper.createGenerateProguardAction(proguardCfg, mainDexProguardCfg);
 
     return new ResourceApk(resourceApk, updatedResources.getJavaSourceJar(),
-        resourceDeps, updatedResources, manifest, proguardCfg, true);
+        resourceDeps, updatedResources, manifest, proguardCfg, mainDexProguardCfg, true);
   }
 
   public Artifact getManifest() {

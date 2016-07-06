@@ -24,6 +24,7 @@ import com.google.common.collect.Range;
 import com.google.common.collect.Sets;
 import com.google.common.eventbus.EventBus;
 import com.google.devtools.build.lib.actions.Action;
+import com.google.devtools.build.lib.actions.ActionAnalysisMetadata;
 import com.google.devtools.build.lib.actions.ActionCacheChecker;
 import com.google.devtools.build.lib.actions.ActionExecutionStatusReporter;
 import com.google.devtools.build.lib.actions.ActionLogBufferPathGenerator;
@@ -88,7 +89,7 @@ import javax.annotation.Nullable;
  */
 public abstract class TimestampBuilderTestCase extends FoundationTestCase {
 
-  private static final SkyKey OWNER_KEY = new SkyKey(SkyFunctions.ACTION_LOOKUP, "OWNER");
+  private static final SkyKey OWNER_KEY = SkyKey.create(SkyFunctions.ACTION_LOOKUP, "OWNER");
   protected static final ActionLookupValue.ActionLookupKey ALL_OWNER =
       new SingletonActionLookupKey();
   protected static final Predicate<Action> ALWAYS_EXECUTE_FILTER = Predicates.alwaysTrue();
@@ -118,7 +119,7 @@ public abstract class TimestampBuilderTestCase extends FoundationTestCase {
     return action;
   }
 
-  protected Builder createBuilder(ActionCache actionCache) {
+  protected Builder createBuilder(ActionCache actionCache) throws Exception {
     return createBuilder(actionCache, 1, /*keepGoing=*/ false);
   }
 
@@ -127,7 +128,7 @@ public abstract class TimestampBuilderTestCase extends FoundationTestCase {
    * specified ActionCache.
    */
   protected Builder createBuilder(
-      final ActionCache actionCache, final int threadCount, final boolean keepGoing) {
+      ActionCache actionCache, final int threadCount, final boolean keepGoing) throws Exception {
     return createBuilder(actionCache, threadCount, keepGoing, null);
   }
 
@@ -135,10 +136,13 @@ public abstract class TimestampBuilderTestCase extends FoundationTestCase {
       final ActionCache actionCache,
       final int threadCount,
       final boolean keepGoing,
-      @Nullable EvaluationProgressReceiver evaluationProgressReceiver) {
+      @Nullable EvaluationProgressReceiver evaluationProgressReceiver) throws Exception {
     AtomicReference<PathPackageLocator> pkgLocator =
         new AtomicReference<>(new PathPackageLocator(outputBase, ImmutableList.of(rootDirectory)));
-    ExternalFilesHelper externalFilesHelper = new ExternalFilesHelper(pkgLocator, false);
+    AtomicReference<TimestampGranularityMonitor> tsgmRef = new AtomicReference<>(tsgm);
+    BlazeDirectories directories = new BlazeDirectories(rootDirectory, outputBase, rootDirectory);
+    ExternalFilesHelper externalFilesHelper = new ExternalFilesHelper(
+        pkgLocator, false, directories);
     differencer = new RecordingDifferencer();
 
     ActionExecutionStatusReporter statusReporter =
@@ -147,20 +151,21 @@ public abstract class TimestampBuilderTestCase extends FoundationTestCase {
         new SkyframeActionExecutor(
             ResourceManager.instance(), eventBusRef, new AtomicReference<>(statusReporter));
 
+    Path actionOutputBase = scratch.dir("/usr/local/google/_blaze_jrluser/FAKEMD5/action_out/");
     skyframeActionExecutor.setActionLogBufferPathGenerator(
         new ActionLogBufferPathGenerator(actionOutputBase));
 
     final InMemoryMemoizingEvaluator evaluator =
         new InMemoryMemoizingEvaluator(
             ImmutableMap.<SkyFunctionName, SkyFunction>builder()
-                .put(SkyFunctions.FILE_STATE, new FileStateFunction(tsgm, externalFilesHelper))
+                .put(SkyFunctions.FILE_STATE, new FileStateFunction(tsgmRef, externalFilesHelper))
                 .put(SkyFunctions.FILE, new FileFunction(pkgLocator))
                 .put(
                     SkyFunctions.ARTIFACT,
                     new ArtifactFunction(Predicates.<PathFragment>alwaysFalse()))
                 .put(
                     SkyFunctions.ACTION_EXECUTION,
-                    new ActionExecutionFunction(skyframeActionExecutor, tsgm))
+                    new ActionExecutionFunction(skyframeActionExecutor, tsgmRef))
                 .put(
                     SkyFunctions.PACKAGE,
                     new PackageFunction(null, null, null, null, null, null, null))
@@ -173,7 +178,7 @@ public abstract class TimestampBuilderTestCase extends FoundationTestCase {
                     new WorkspaceFileFunction(
                         TestRuleClassProvider.getRuleClassProvider(),
                         new PackageFactory(TestRuleClassProvider.getRuleClassProvider()),
-                        new BlazeDirectories(rootDirectory, outputBase, rootDirectory)))
+                        directories))
                 .put(SkyFunctions.EXTERNAL_PACKAGE, new ExternalPackageFunction())
                 .build(),
             differencer,
@@ -185,7 +190,9 @@ public abstract class TimestampBuilderTestCase extends FoundationTestCase {
     return new Builder() {
       private void setGeneratingActions() {
         if (evaluator.getExistingValueForTesting(OWNER_KEY) == null) {
-          differencer.inject(ImmutableMap.of(OWNER_KEY, new ActionLookupValue(actions)));
+          differencer.inject(ImmutableMap.of(
+              OWNER_KEY,
+              new ActionLookupValue(ImmutableList.<ActionAnalysisMetadata>copyOf(actions))));
         }
       }
 
@@ -283,14 +290,14 @@ public abstract class TimestampBuilderTestCase extends FoundationTestCase {
   /**
    * Creates and returns a new "amnesiac" builder based on the amnesiac cache.
    */
-  protected Builder amnesiacBuilder() {
+  protected Builder amnesiacBuilder() throws Exception {
     return createBuilder(AMNESIAC_CACHE);
   }
 
   /**
    * Creates and returns a new caching builder based on the inMemoryCache.
    */
-  protected Builder cachingBuilder() {
+  protected Builder cachingBuilder() throws Exception {
     return createBuilder(inMemoryCache);
   }
 

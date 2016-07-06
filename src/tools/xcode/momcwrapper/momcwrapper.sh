@@ -22,14 +22,14 @@
 
 set -eu
 
-MY_LOCATION=${MY_LOCATION:-"$0.runfiles/external/bazel_tools/tools/objc"}
+MY_LOCATION=${MY_LOCATION:-"$0.runfiles/bazel_tools/tools/objc"}
 REALPATH="${MY_LOCATION}/realpath"
 WRAPPER="${MY_LOCATION}/xcrunwrapper.sh"
 
 OUTZIP=$("${REALPATH}" "$1")
 NAME="$2"
 shift 2
-TEMPDIR=$(mktemp -d -t momcZippingOutput)
+TEMPDIR=$(mktemp -d "${TMPDIR:-/tmp}/momcZippingOutput.XXXXXX")
 trap "rm -rf \"$TEMPDIR\"" EXIT
 
 $WRAPPER momc "$@" "$TEMPDIR/$NAME"

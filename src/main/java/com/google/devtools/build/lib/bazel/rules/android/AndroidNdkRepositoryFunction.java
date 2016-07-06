@@ -14,14 +14,15 @@
 package com.google.devtools.build.lib.bazel.rules.android;
 
 import com.google.common.collect.ImmutableList;
+import com.google.devtools.build.lib.analysis.BlazeDirectories;
 import com.google.devtools.build.lib.analysis.RuleDefinition;
-import com.google.devtools.build.lib.bazel.rules.android.ndkcrosstools.AndroidNdkCrosstools;
-import com.google.devtools.build.lib.bazel.rules.android.ndkcrosstools.AndroidNdkCrosstools.NdkCrosstoolsException;
-import com.google.devtools.build.lib.bazel.rules.android.ndkcrosstools.ApiLevel;
-import com.google.devtools.build.lib.bazel.rules.android.ndkcrosstools.NdkPaths;
 import com.google.devtools.build.lib.bazel.rules.android.ndkcrosstools.NdkRelease;
-import com.google.devtools.build.lib.bazel.rules.android.ndkcrosstools.StlImpl;
-import com.google.devtools.build.lib.bazel.rules.android.ndkcrosstools.StlImpls;
+import com.google.devtools.build.lib.bazel.rules.android.ndkcrosstools.r10e.AndroidNdkCrosstoolsR10e;
+import com.google.devtools.build.lib.bazel.rules.android.ndkcrosstools.r10e.AndroidNdkCrosstoolsR10e.NdkCrosstoolsException;
+import com.google.devtools.build.lib.bazel.rules.android.ndkcrosstools.r10e.ApiLevel;
+import com.google.devtools.build.lib.bazel.rules.android.ndkcrosstools.r10e.NdkPaths;
+import com.google.devtools.build.lib.bazel.rules.android.ndkcrosstools.r10e.StlImpl;
+import com.google.devtools.build.lib.bazel.rules.android.ndkcrosstools.r10e.StlImpls;
 import com.google.devtools.build.lib.packages.AttributeMap;
 import com.google.devtools.build.lib.packages.NonconfigurableAttributeMapper;
 import com.google.devtools.build.lib.packages.Rule;
@@ -38,7 +39,6 @@ import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.lib.vfs.RootedPath;
 import com.google.devtools.build.lib.view.config.crosstool.CrosstoolConfig.CToolchain;
 import com.google.devtools.build.lib.view.config.crosstool.CrosstoolConfig.CrosstoolRelease;
-import com.google.devtools.build.lib.view.config.crosstool.CrosstoolConfig.DefaultCpuToolchain;
 import com.google.devtools.build.skyframe.SkyFunction.Environment;
 import com.google.devtools.build.skyframe.SkyFunctionException;
 import com.google.devtools.build.skyframe.SkyFunctionException.Transience;
@@ -69,15 +69,16 @@ public class AndroidNdkRepositoryFunction extends RepositoryFunction {
   }
 
   @Override
-  public boolean isLocal() {
+  public boolean isLocal(Rule rule) {
     return true;
   }
 
   @Override
-  public SkyValue fetch(Rule rule, Path outputDirectory, Environment env)
-      throws SkyFunctionException {
+  public SkyValue fetch(
+      Rule rule, Path outputDirectory, BlazeDirectories directories, Environment env)
+          throws SkyFunctionException {
     prepareLocalRepositorySymlinkTree(rule, outputDirectory);
-    PathFragment pathFragment = getTargetPath(rule, getWorkspace());
+    PathFragment pathFragment = getTargetPath(rule, directories.getWorkspace());
     Path ndkSymlinkTreeDirectory = outputDirectory.getRelative("ndk");
     try {
       ndkSymlinkTreeDirectory.createDirectory();
@@ -85,8 +86,8 @@ public class AndroidNdkRepositoryFunction extends RepositoryFunction {
       throw new RepositoryFunctionException(e, Transience.TRANSIENT);
     }
 
-    if (!symlinkLocalRepositoryContents(
-        ndkSymlinkTreeDirectory, getOutputBase().getFileSystem().getPath(pathFragment))) {
+    if (!symlinkLocalRepositoryContents(ndkSymlinkTreeDirectory,
+        directories.getOutputBase().getFileSystem().getPath(pathFragment))) {
       return null;
     }
 
@@ -103,16 +104,15 @@ public class AndroidNdkRepositoryFunction extends RepositoryFunction {
     ImmutableList.Builder<CrosstoolStlPair> crosstoolsAndStls = ImmutableList.builder();
     try {
 
-      String hostPlatform = AndroidNdkCrosstools.getHostPlatform(ndkRelease);
+      String hostPlatform = AndroidNdkCrosstoolsR10e.getHostPlatform(ndkRelease);
       NdkPaths ndkPaths = new NdkPaths(ruleName, hostPlatform, apiLevel);
 
       for (StlImpl stlImpl : StlImpls.get(ndkPaths)) {
 
-        CrosstoolRelease crosstoolRelease = AndroidNdkCrosstools.create(
+        CrosstoolRelease crosstoolRelease = AndroidNdkCrosstoolsR10e.create(
             env.getListener(),
             ndkPaths,
             ruleName,
-            apiLevel,
             ndkRelease,
             stlImpl,
             hostPlatform);
@@ -150,9 +150,11 @@ public class AndroidNdkRepositoryFunction extends RepositoryFunction {
       CrosstoolRelease crosstool = crosstoolStlPair.crosstoolRelease;
 
       StringBuilder toolchainMap = new StringBuilder();
-      for (DefaultCpuToolchain defaultToolchain : crosstool.getDefaultToolchainList()) {
-        toolchainMap.append(String.format("      \"%s\": \":%s\",\n",
-            defaultToolchain.getCpu(), defaultToolchain.getToolchainIdentifier()));
+      for (CToolchain toolchain : crosstool.getToolchainList()) {
+        toolchainMap.append(String.format("      \"%s|%s\": \":%s\",\n",
+            toolchain.getTargetCpu(),
+            toolchain.getCompiler(),
+            toolchain.getToolchainIdentifier()));
       }
 
       String toolchainName = createToolchainName(crosstoolStlPair.stlImpl.getName());

@@ -15,6 +15,7 @@ package com.google.devtools.build.lib.sandbox;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Predicates;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.io.Files;
@@ -63,8 +64,10 @@ import java.util.concurrent.atomic.AtomicInteger;
 /**
  * Strategy that uses sandboxing to execute a process.
  */
-@ExecutionStrategy(name = {"sandboxed"},
-                   contextType = SpawnActionContext.class)
+@ExecutionStrategy(
+  name = {"sandboxed"},
+  contextType = SpawnActionContext.class
+)
 public class LinuxSandboxedStrategy implements SpawnActionContext {
   private final ExecutorService backgroundWorkers;
 
@@ -73,7 +76,9 @@ public class LinuxSandboxedStrategy implements SpawnActionContext {
   private final Path execRoot;
   private final boolean verboseFailures;
   private final boolean sandboxDebug;
+  private final boolean unblockNetwork;
   private final StandaloneSpawnStrategy standaloneStrategy;
+  private final List<String> sandboxAddPath;
   private final UUID uuid = UUID.randomUUID();
   private final AtomicInteger execCounter = new AtomicInteger();
 
@@ -82,13 +87,17 @@ public class LinuxSandboxedStrategy implements SpawnActionContext {
       BlazeDirectories blazeDirs,
       ExecutorService backgroundWorkers,
       boolean verboseFailures,
-      boolean sandboxDebug) {
+      boolean sandboxDebug,
+      List<String> sandboxAddPath,
+      boolean unblockNetwork) {
     this.clientEnv = ImmutableMap.copyOf(clientEnv);
     this.blazeDirs = blazeDirs;
     this.execRoot = blazeDirs.getExecRoot();
     this.backgroundWorkers = Preconditions.checkNotNull(backgroundWorkers);
     this.verboseFailures = verboseFailures;
     this.sandboxDebug = sandboxDebug;
+    this.sandboxAddPath = sandboxAddPath;
+    this.unblockNetwork = unblockNetwork;
     this.standaloneStrategy = new StandaloneSpawnStrategy(blazeDirs.getExecRoot(), verboseFailures);
   }
 
@@ -158,7 +167,7 @@ public class LinuxSandboxedStrategy implements SpawnActionContext {
             outErr,
             outputFiles.build(),
             timeout,
-            !spawn.getExecutionInfo().containsKey("requires-network"));
+            !this.unblockNetwork && !spawn.getExecutionInfo().containsKey("requires-network"));
       } finally {
         // Due to the Linux kernel behavior, if we try to remove the sandbox too quickly after the
         // process has exited, we get "Device busy" errors because some of the mounts have not yet
@@ -221,6 +230,8 @@ public class LinuxSandboxedStrategy implements SpawnActionContext {
       throws IOException, ExecException {
     ImmutableMap.Builder<Path, Path> result = new ImmutableMap.Builder<>();
     result.putAll(mountUsualUnixDirs());
+    result.putAll(mountUserDefinedPath());
+
     MountMap mounts = new MountMap();
     mounts.putAll(setupBlazeUtils());
     mounts.putAll(mountRunfilesFromManifests(spawn));
@@ -304,6 +315,14 @@ public class LinuxSandboxedStrategy implements SpawnActionContext {
     mounts.put(fs.getPath("/bin"), fs.getPath("/bin"));
     mounts.put(fs.getPath("/sbin"), fs.getPath("/sbin"));
     mounts.put(fs.getPath("/etc"), fs.getPath("/etc"));
+
+    // Check if /etc/resolv.conf is a symlink and mount its target
+    // Fix #738
+    Path resolv = fs.getPath("/etc/resolv.conf");
+    if (resolv.exists() && resolv.isSymbolicLink()) {
+      mounts.put(resolv.resolveSymbolicLinks(), resolv.resolveSymbolicLinks());
+    }
+
     for (String entry : NativePosixFiles.readdir("/")) {
       if (entry.startsWith("lib")) {
         Path libDir = fs.getRootDirectory().getRelative(entry);
@@ -498,13 +517,98 @@ public class LinuxSandboxedStrategy implements SpawnActionContext {
     return mounts;
   }
 
+  /**
+   * Mount all user defined path in --sandbox_add_path.
+   */
+  private MountMap mountUserDefinedPath() throws IOException {
+    MountMap mounts = new MountMap();
+    FileSystem fs = blazeDirs.getFileSystem();
+
+    ImmutableList<Path> exclude =
+        ImmutableList.of(blazeDirs.getWorkspace(), blazeDirs.getOutputBase());
+
+    for (String pathStr : sandboxAddPath) {
+      Path path = fs.getPath(pathStr);
+
+      // Check if path is in {workspace, outputBase}
+      for (Path exc : exclude) {
+        if (path.startsWith(exc)) {
+          throw new IllegalArgumentException(
+              "Mounting subdirectory of WORKSPACE or OUTPUTBASE to sandbox is not allowed.");
+        }
+      }
+
+      // Check if path is ancestor of {workspace, outputBase}
+      // Mount subdirectory of path except {workspace, outputBase}
+      mounts.putAll(mountChildDirExclude(path, exclude));
+    }
+
+    return mounts;
+  }
+
+  /**
+   * Mount all subdirectories recursively except some paths
+   */
+  private MountMap mountDirExclude(Path path, List<Path> exclude) throws IOException {
+    MountMap mounts = new MountMap();
+
+    if (!path.isDirectory(Symlinks.NOFOLLOW)) {
+      if (!exclude.contains(path)) {
+        mounts.put(path, path);
+      }
+      return mounts;
+    }
+
+    try {
+      for (Path child : path.getDirectoryEntries()) {
+        // Ignore broken symlink
+        if (!child.exists()) {
+          continue;
+        }
+
+        mounts.putAll(mountChildDirExclude(child, exclude));
+      }
+    } catch (IOException e) {
+      throw new IOException("Illegal additional path for mount", e);
+    }
+
+    return mounts;
+  }
+
+  /**
+   * Helper function of mountDirExclude and mountUserDefinedPath
+   */
+  private MountMap mountChildDirExclude(Path child, List<Path> exclude) throws IOException {
+    MountMap mounts = new MountMap();
+
+    boolean startsWithFlag = false;
+    for (Path exc : exclude) {
+      if (exc.startsWith(child)) {
+        startsWithFlag = true;
+        break;
+      }
+    }
+    if (!startsWithFlag) {
+      mounts.put(child, child);
+    } else if (!exclude.contains(child)) {
+      mounts.putAll(mountDirExclude(child, exclude));
+    }
+
+    return mounts;
+  }
+
   @Override
-  public boolean isRemotable(String mnemonic, boolean remotable) {
+  public boolean willExecuteRemotely(boolean remotable) {
     return false;
   }
 
   @Override
   public String toString() {
     return "sandboxed";
+  }
+
+  @Override
+  public boolean shouldPropagateExecException() {
+    return verboseFailures && sandboxDebug;
   }
 }

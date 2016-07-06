@@ -29,6 +29,7 @@ import com.google.devtools.build.lib.analysis.config.BuildOptions;
 import com.google.devtools.build.lib.analysis.config.ConfigurationFactory;
 import com.google.devtools.build.lib.analysis.config.FragmentOptions;
 import com.google.devtools.build.lib.analysis.config.InvalidConfigurationException;
+import com.google.devtools.build.lib.flags.InvocationPolicyEnforcer;
 import com.google.devtools.build.lib.packages.PackageFactory;
 import com.google.devtools.build.lib.packages.Preprocessor;
 import com.google.devtools.build.lib.packages.util.MockToolsConfig;
@@ -38,7 +39,6 @@ import com.google.devtools.build.lib.skyframe.DiffAwareness;
 import com.google.devtools.build.lib.skyframe.PrecomputedValue;
 import com.google.devtools.build.lib.skyframe.SequencedSkyframeExecutor;
 import com.google.devtools.build.lib.skyframe.SkyValueDirtinessChecker;
-import com.google.devtools.build.lib.skyframe.SkyframeExecutor;
 import com.google.devtools.build.lib.testutil.FoundationTestCase;
 import com.google.devtools.build.lib.testutil.TestConstants;
 import com.google.devtools.build.lib.testutil.TestRuleClassProvider;
@@ -79,7 +79,7 @@ public abstract class ConfigurationTestCase extends FoundationTestCase {
     public List<String> multiCpus;
   }
 
-  protected SkyframeExecutor skyframeExecutor;
+  protected SequencedSkyframeExecutor skyframeExecutor;
   protected ConfigurationFactory configurationFactory;
   protected Path workspace;
   protected ImmutableList<Class<? extends FragmentOptions>> buildOptionClasses;
@@ -100,7 +100,6 @@ public abstract class ConfigurationTestCase extends FoundationTestCase {
     skyframeExecutor =
         SequencedSkyframeExecutor.create(
             pkgFactory,
-            new TimestampGranularityMonitor(BlazeClock.instance()),
             directories,
             BinTools.forUnitTesting(directories, TestConstants.EMBEDDED_TOOLS),
             workspaceStatusActionFactory,
@@ -108,13 +107,18 @@ public abstract class ConfigurationTestCase extends FoundationTestCase {
             ImmutableList.<DiffAwareness.Factory>of(),
             Predicates.<PathFragment>alwaysFalse(),
             Preprocessor.Factory.Supplier.NullSupplier.INSTANCE,
-            analysisMock.getSkyFunctions(directories),
+            analysisMock.getSkyFunctions(),
             ImmutableList.<PrecomputedValue.Injected>of(),
             ImmutableList.<SkyValueDirtinessChecker>of());
 
-    skyframeExecutor.preparePackageLoading(pkgLocator,
-        Options.getDefaults(PackageCacheOptions.class).defaultVisibility, true,
-        7, ruleClassProvider.getDefaultsPackageContent(), UUID.randomUUID());
+    skyframeExecutor.preparePackageLoading(
+        pkgLocator,
+        Options.getDefaults(PackageCacheOptions.class).defaultVisibility,
+        true,
+        7,
+        ruleClassProvider.getDefaultsPackageContent(TestConstants.TEST_INVOCATION_POLICY),
+        UUID.randomUUID(),
+        new TimestampGranularityMonitor(BlazeClock.instance()));
 
     analysisMock.setupMockClient(new MockToolsConfig(rootDirectory));
     analysisMock.setupMockWorkspaceFiles(directories.getEmbeddedBinariesRoot());
@@ -149,14 +153,18 @@ public abstract class ConfigurationTestCase extends FoundationTestCase {
         .add(TestOptions.class)
         .build());
     parser.parse(args);
+
+    InvocationPolicyEnforcer optionsPolicyEnforcer =
+        new InvocationPolicyEnforcer(TestConstants.TEST_INVOCATION_POLICY);
+    optionsPolicyEnforcer.enforce(parser);
+
     ImmutableSortedSet<String> multiCpu = ImmutableSortedSet.copyOf(
         parser.getOptions(TestOptions.class).multiCpus);
 
-    configurationFactory.forbidSanityCheck();
     BuildOptions buildOptions = BuildOptions.of(buildOptionClasses, parser);
+    skyframeExecutor.handleDiffs(reporter);
     BuildConfigurationCollection collection = skyframeExecutor.createConfigurations(
-        reporter, configurationFactory, buildOptions,
-        new BlazeDirectories(outputBase, outputBase, workspace), multiCpu, false);
+        reporter, configurationFactory, buildOptions, multiCpu, false);
     return collection;
   }
 

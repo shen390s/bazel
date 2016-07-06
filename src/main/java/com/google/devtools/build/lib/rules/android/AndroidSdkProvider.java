@@ -19,6 +19,7 @@ import com.google.devtools.build.lib.analysis.RuleConfiguredTarget.Mode;
 import com.google.devtools.build.lib.analysis.RuleContext;
 import com.google.devtools.build.lib.analysis.TransitiveInfoCollection;
 import com.google.devtools.build.lib.analysis.TransitiveInfoProvider;
+import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 
 /**
@@ -28,10 +29,12 @@ import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 public final class AndroidSdkProvider implements TransitiveInfoProvider {
 
   private final String buildToolsVersion;
+  private final boolean aaptSupportsMainDexGeneration;
   private final Artifact frameworkAidl;
   private final Artifact androidJar;
   private final Artifact shrinkedAndroidJar;
-  private final Artifact androidJack;
+  private final NestedSet<Artifact> androidBaseClasspathForJack;
+  private final NestedSet<Artifact> javaBaseClasspathForJack;
   private final Artifact annotationsJar;
   private final Artifact mainDexClasses;
   private final FilesToRunProvider adb;
@@ -48,10 +51,12 @@ public final class AndroidSdkProvider implements TransitiveInfoProvider {
 
   public AndroidSdkProvider(
       String buildToolsVersion,
+      boolean aaptSupportsMainDexGeneration,
       Artifact frameworkAidl,
       Artifact androidJar,
       Artifact shrinkedAndroidJar,
-      Artifact androidJack,
+      NestedSet<Artifact> androidBaseClasspathForJack,
+      NestedSet<Artifact> javaBaseClasspathForJack,
       Artifact annotationsJar,
       Artifact mainDexClasses,
       FilesToRunProvider adb,
@@ -67,10 +72,12 @@ public final class AndroidSdkProvider implements TransitiveInfoProvider {
       FilesToRunProvider resourceExtractor) {
 
     this.buildToolsVersion = buildToolsVersion;
+    this.aaptSupportsMainDexGeneration = aaptSupportsMainDexGeneration;
     this.frameworkAidl = frameworkAidl;
     this.androidJar = androidJar;
     this.shrinkedAndroidJar = shrinkedAndroidJar;
-    this.androidJack = androidJack;
+    this.androidBaseClasspathForJack = androidBaseClasspathForJack;
+    this.javaBaseClasspathForJack = javaBaseClasspathForJack;
     this.annotationsJar = annotationsJar;
     this.mainDexClasses = mainDexClasses;
     this.adb = adb;
@@ -118,7 +125,11 @@ public final class AndroidSdkProvider implements TransitiveInfoProvider {
   public String getBuildToolsVersion() {
     return buildToolsVersion;
   }
-  
+
+  public boolean getAaptSupportsMainDexGeneration() {
+    return aaptSupportsMainDexGeneration;
+  }
+
   public Artifact getFrameworkAidl() {
     return frameworkAidl;
   }
@@ -131,8 +142,20 @@ public final class AndroidSdkProvider implements TransitiveInfoProvider {
     return shrinkedAndroidJar;
   }
 
-  public Artifact getAndroidJack() {
-    return androidJack;
+  /**
+   * Returns the set of jack files to be used as a base classpath for jack compilation of Android
+   * rules, typically a Jack translation of the jar returned by {@link getAndroidJar}.
+   */
+  public NestedSet<Artifact> getAndroidBaseClasspathForJack() {
+    return androidBaseClasspathForJack;
+  }
+
+  /**
+   * Returns the set of jack files to be used as a base classpath for jack compilation of Java
+   * rules, typically a Jack translation of the jars in the Java bootclasspath.
+   */
+  public NestedSet<Artifact> getJavaBaseClasspathForJack() {
+    return javaBaseClasspathForJack;
   }
 
   public Artifact getAnnotationsJar() {

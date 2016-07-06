@@ -19,7 +19,6 @@ import static com.google.devtools.build.lib.analysis.config.BuildConfiguration.S
 import com.google.common.base.Function;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
-import com.google.common.collect.UnmodifiableIterator;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.analysis.FileProvider;
 import com.google.devtools.build.lib.analysis.RuleConfiguredTarget.Mode;
@@ -56,6 +55,8 @@ import java.util.Map;
  * Java compiler.
  */
 public final class JavaLibraryHelper {
+  private static final String DEFAULT_SUFFIX_IS_EMPTY_STRING = "";
+
   /**
    * Function for extracting the {@link JavaCompilationArgs} - note that it also handles .jar files.
    */
@@ -91,6 +92,7 @@ public final class JavaLibraryHelper {
 
   private final RuleContext ruleContext;
   private final BuildConfiguration configuration;
+  private final String implicitAttributesSuffix;
 
   private Artifact output;
   private final List<Artifact> sourceJars = new ArrayList<>();
@@ -109,9 +111,14 @@ public final class JavaLibraryHelper {
   private boolean legacyCollectCppAndJavaLinkOptions;
 
   public JavaLibraryHelper(RuleContext ruleContext) {
+    this(ruleContext, DEFAULT_SUFFIX_IS_EMPTY_STRING);
+  }
+
+  public JavaLibraryHelper(RuleContext ruleContext, String implicitAttributesSuffix) {
     this.ruleContext = ruleContext;
     this.configuration = ruleContext.getConfiguration();
     this.classpathMode = ruleContext.getFragment(JavaConfiguration.class).getReduceJavaClasspath();
+    this.implicitAttributesSuffix = implicitAttributesSuffix;
   }
 
   /**
@@ -173,11 +180,6 @@ public final class JavaLibraryHelper {
 
       @Override
       public Object get(String providerKey) {
-        throw new UnsupportedOperationException();
-      }
-
-      @Override
-      public UnmodifiableIterator<TransitiveInfoProvider> iterator() {
         throw new UnsupportedOperationException();
       }
     };
@@ -249,7 +251,8 @@ public final class JavaLibraryHelper {
 
     JavaCompilationArtifacts.Builder artifactsBuilder = new JavaCompilationArtifacts.Builder();
     JavaCompilationHelper helper =
-        new JavaCompilationHelper(ruleContext, semantics, javacOpts, attributes);
+        new JavaCompilationHelper(
+            ruleContext, semantics, javacOpts, attributes, implicitAttributesSuffix);
     Artifact outputDepsProto = helper.createOutputDepsProtoArtifact(output, artifactsBuilder);
     helper.createCompileAction(
         output,
@@ -362,7 +365,8 @@ public final class JavaLibraryHelper {
 
   private JavaRunfilesProvider collectJavaRunfiles(
       JavaCompilationArtifacts javaCompilationArtifacts) {
-    Runfiles runfiles = new Runfiles.Builder(ruleContext.getWorkspaceName())
+    Runfiles runfiles = new Runfiles.Builder(
+        ruleContext.getWorkspaceName(), ruleContext.getConfiguration().legacyExternalRunfiles())
         // Compiled templates as well, for API.
         .addArtifacts(javaCompilationArtifacts.getRuntimeJars())
         .addTargets(deps, JavaRunfilesProvider.TO_RUNFILES)

@@ -29,6 +29,7 @@ import com.google.devtools.build.lib.rules.cpp.CcToolchainFeatures.Variables;
 import com.google.devtools.build.lib.testutil.Suite;
 import com.google.devtools.build.lib.testutil.TestSpec;
 import com.google.devtools.build.lib.testutil.TestUtils;
+import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.lib.view.config.crosstool.CrosstoolConfig.CToolchain;
 import com.google.protobuf.TextFormat;
 
@@ -87,7 +88,7 @@ public class CcToolchainFeaturesTest {
     FeatureConfiguration configuration =
         features.getFeatureConfiguration(Arrays.asList(requestedFeatures));
     ImmutableSet.Builder<String> enabledFeatures = ImmutableSet.builder();
-    for (String feature : features.getFeatureNames()) {
+    for (String feature : features.getActivatableNames()) {
       if (configuration.isEnabled(feature)) {
         enabledFeatures.add(feature);
       }
@@ -279,17 +280,23 @@ public class CcToolchainFeaturesTest {
     }
   }
   
-  private Variables.NestedSequence createNestedSequence(int depth, int count, String prefix) {
-    Variables.NestedSequence.Builder builder = new Variables.NestedSequence.Builder();
-    for (int i = 0; i < count; ++i) {
-      String value = prefix + String.valueOf(i);
-      if (depth == 0) {
+  private Variables.Sequence createNestedSequence(int depth, int count, String prefix) {
+    if (depth == 0) {
+      Variables.ValueSequence.Builder builder = new Variables.ValueSequence.Builder();
+      for (int i = 0; i < count; ++i) {
+        String value = prefix + i;
         builder.addValue(value);
-      } else {
+      }
+      return builder.build();
+
+    } else {
+      Variables.NestedSequence.Builder builder = new Variables.NestedSequence.Builder();
+      for (int i = 0; i < count; ++i) {
+        String value = prefix + i;
         builder.addSequence(createNestedSequence(depth - 1, count, value));
       }
+      return builder.build();
     }
-    return builder.build();
   }
 
   private Variables createNestedVariables(String name, int depth, int count) {
@@ -577,5 +584,173 @@ public class CcToolchainFeaturesTest {
     assertThat(getEnabledFeatures(deserialized, "b")).containsExactly("a", "b");    
     assertThat(features.getFeatureConfiguration("b").getCommandLine(CppCompileAction.CPP_COMPILE,
         createVariables("v", "1"))).containsExactly("-f", "1");
+  }
+  
+  @Test
+  public void testSimpleActionTool() throws Exception {
+    FeatureConfiguration configuration =
+        buildFeatures(
+                "action_config {",
+                "  config_name: 'action-a'",
+                "  action_name: 'action-a'",
+                "  tool {",
+                "    tool_path: 'toolchain/a'",
+                "  }",
+                "}",
+                "feature {",
+                "   name: 'activates-action-a'",
+                "   implies: 'action-a'",
+                "}")
+            .getFeatureConfiguration("activates-action-a");
+    PathFragment crosstoolPath = new PathFragment("crosstool/");
+    PathFragment toolPath = configuration.getToolForAction("action-a").getToolPath(crosstoolPath);
+    assertThat(toolPath.toString()).isEqualTo("crosstool/toolchain/a");
+  }
+
+  @Test
+  public void testActionToolFromFeatureSet() throws Exception {
+    CcToolchainFeatures toolchainFeatures =
+        buildFeatures(
+            "action_config {",
+            "  config_name: 'action-a'",
+            "  action_name: 'action-a'",
+            "  tool {",
+            "    tool_path: 'toolchain/features-a-and-b'",
+            "    with_feature: {",
+            "      feature: 'feature-a'",
+            "      feature: 'feature-b'",
+            "     }",
+            "  }",
+            "  tool {",
+            "    tool_path: 'toolchain/feature-a'",
+            "    with_feature: { feature: 'feature-a' }",
+            "  }",
+            "  tool {",
+            "    tool_path: 'toolchain/feature-b'",
+            "    with_feature: { feature: 'feature-b' }",
+            "  }",
+            "  tool {",
+            "    tool_path: 'toolchain/default'",
+            "  }",
+            "}",
+            "feature {",
+            "  name: 'feature-a'",
+            "}",
+            "feature {",
+            "  name: 'feature-b'",
+            "}",
+            "feature {",
+            "  name: 'activates-action-a'",
+            "  implies: 'action-a'",
+            "}");
+
+    PathFragment crosstoolPath = new PathFragment("crosstool/");
+
+    FeatureConfiguration featureAConfiguration =
+        toolchainFeatures.getFeatureConfiguration("feature-a", "activates-action-a");
+    assertThat(
+            featureAConfiguration
+                .getToolForAction("action-a")
+                .getToolPath(crosstoolPath)
+                .toString())
+        .isEqualTo("crosstool/toolchain/feature-a");
+
+    FeatureConfiguration featureBConfiguration =
+        toolchainFeatures.getFeatureConfiguration("feature-b", "activates-action-a");
+    assertThat(
+            featureBConfiguration
+                .getToolForAction("action-a")
+                .getToolPath(crosstoolPath)
+                .toString())
+        .isEqualTo("crosstool/toolchain/feature-b");
+
+    FeatureConfiguration featureAAndBConfiguration =
+        toolchainFeatures.getFeatureConfiguration("feature-a", "feature-b", "activates-action-a");
+    assertThat(
+            featureAAndBConfiguration
+                .getToolForAction("action-a")
+                .getToolPath(crosstoolPath)
+                .toString())
+        .isEqualTo("crosstool/toolchain/features-a-and-b");
+
+    FeatureConfiguration noFeaturesConfiguration =
+        toolchainFeatures.getFeatureConfiguration("activates-action-a");
+    assertThat(
+            noFeaturesConfiguration
+                .getToolForAction("action-a")
+                .getToolPath(crosstoolPath)
+                .toString())
+        .isEqualTo("crosstool/toolchain/default");
+  }
+
+  @Test
+  public void testErrorForNoMatchingTool() throws Exception {
+    CcToolchainFeatures toolchainFeatures =
+        buildFeatures(
+            "action_config {",
+            "  config_name: 'action-a'",
+            "  action_name: 'action-a'",
+            "  tool {",
+            "    tool_path: 'toolchain/feature-a'",
+            "    with_feature: { feature: 'feature-a' }",
+            "  }",
+            "}",
+            "feature {",
+            "  name: 'feature-a'",
+            "}",
+            "feature {",
+            "  name: 'activates-action-a'",
+            "  implies: 'action-a'",
+            "}");
+
+    PathFragment crosstoolPath = new PathFragment("crosstool/");
+
+    FeatureConfiguration noFeaturesConfiguration =
+        toolchainFeatures.getFeatureConfiguration("activates-action-a");
+
+    try {
+      noFeaturesConfiguration.getToolForAction("action-a").getToolPath(crosstoolPath);
+      fail("Expected IllegalArgumentException");
+    } catch (IllegalArgumentException e) {
+      assertThat(e.getMessage())
+          .contains("Matching tool for action action-a not found for given feature configuration");
+    }
+  }
+
+  @Test
+  public void testInvalidActionConfigurationDuplicateActionConfigs() throws Exception {
+    try {
+      buildFeatures(
+          "action_config {",
+          "  config_name: 'action-a'",
+          "  action_name: 'action-1'",
+          "}",
+          "action_config {",
+          "  config_name: 'action-a'",
+          "  action_name: 'action-2'",
+          "}");
+      fail("Expected InvalidConfigurationException");
+    } catch (InvalidConfigurationException e) {
+      assertThat(e.getMessage())
+          .contains("feature or action config 'action-a' was specified multiple times.");
+    }
+  }
+
+  @Test
+  public void testInvalidActionConfigurationMultipleActionConfigsForAction() throws Exception {
+    try {
+      buildFeatures(
+          "action_config {",
+          "  config_name: 'name-a'",
+          "  action_name: 'action-a'",
+          "}",
+          "action_config {",
+          "  config_name: 'name-b'",
+          "  action_name: 'action-a'",
+          "}");
+      fail("Expected InvalidConfigurationException");
+    } catch (InvalidConfigurationException e) {
+      assertThat(e.getMessage()).contains("multiple action configs for action 'action-a'");
+    }
   }
 }

@@ -86,8 +86,8 @@ public class BuildRequest implements OptionsClassProvider {
             defaultValue = "null",
             category = "verbosity",
             converter = OptionsUtils.PathFragmentConverter.class,
-            help = "Causes Blaze to explain each executed step of the build. "
-            + "The explanation is written to the specified log file.")
+            help = "Causes " + Constants.PRODUCT_NAME + " to explain each executed step of the "
+            + "build. The explanation is written to the specified log file.")
     public PathFragment explanationPath;
 
     @Option(name = "verbose_explanations",
@@ -245,19 +245,13 @@ public class BuildRequest implements OptionsClassProvider {
                 + "the --cpu option is ignored.")
     public List<String> multiCpus;
 
-    @Option(name = "experimental_check_output_files",
-            defaultValue = "true",
-            category = "undocumented",
-            help = "Check for modifications made to the output files of a build. Consider setting "
-                + "this flag to false to see the effect on incremental build times.")
-    public boolean checkOutputFiles;
-
     @Option(name = "experimental_output_tree_tracking",
             defaultValue = "false",
             category = "undocumented",
-            help = "If set, communicate with objsfd to track when files in the output tree have "
-                + "been modified externally (not by Blaze). This should improve incremental build "
-                + "speed.")
+            help = "If set, tell the output service (if any) to track when files in the output "
+                + "tree have been modified externally (not by " + Constants.PRODUCT_NAME + "). "
+                + "This should improve incremental build speed when an appropriate output service "
+                + "is enabled.")
     public boolean finalizeActions;
 
     @Option(

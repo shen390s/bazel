@@ -136,10 +136,9 @@ public class BlazeServerStartupOptions extends OptionsBase {
   @Option(name = "max_idle_secs",
       defaultValue = "" + (3 * 3600), // NOTE: purely decorative!  See class docstring.
       category = "server startup",
-      help = "The number of seconds the build server will wait idling " +
-             "before shutting down. Note: Blaze will ignore this option " +
-             "unless you are starting a new instance. See also 'blaze help " +
-             "shutdown'.")
+      help = "The number of seconds the build server will wait idling before shutting down. Zero "
+             + "means that the server will never shutdown Note: Blaze will ignore this option "
+             + "unless you are starting a new instance. See also 'blaze help shutdown'.")
   public int maxIdleSeconds;
 
   @Option(name = "batch",
@@ -165,6 +164,27 @@ public class BlazeServerStartupOptions extends OptionsBase {
       help = "If set, the execution root will be under $OUTPUT_BASE/execroot instead of "
           + "$OUTPUT_BASE")
   public boolean deepExecRoot;
+
+  @Option(
+    name = "experimental_oom_more_eagerly",
+    defaultValue = "false", // NOTE: purely decorative!  See class docstring.
+    category = "server startup",
+    help =
+        "If set, attempt to detect Java heap OOM conditions and exit before thrashing.  Only "
+            + "honored when --batch is also passed. In some cases, builds that previously succeeded"
+            + " may OOM if they were close to OOMing before."
+  )
+  public boolean oomMoreEagerly;
+
+  @Option(
+    name = "experimental_oom_more_eagerly_threshold",
+    defaultValue = "100", // NOTE: purely decorative!  See class docstring.
+    category = "server startup",
+    help =
+        "If --experimental_oom_more_eagerly is set, Blaze will OOM if, after two full GC's, more "
+            + "than this percentage of the (old gen) heap is still occupied."
+  )
+  public int oomMoreEagerlyThreshold;
 
   @Option(name = "block_for_lock",
       defaultValue = "true", // NOTE: purely decorative!  See class docstring.
@@ -236,4 +256,11 @@ public class BlazeServerStartupOptions extends OptionsBase {
           + "invocation_policy.InvocationPolicy proto. Unlike other options, it is an error to "
           + "specify --invocation_policy multiple times.")
   public String invocationPolicy;
+
+  @Option(name = "command_port",
+      defaultValue = "-1",
+      category = "undocumented",
+      help = "Port to start up the gRPC command server on. If 0, let the kernel choose. If -1, "
+          + "use a custom protocol on an AF_UNIX socket.")
+  public int commandPort;
 }

@@ -27,6 +27,7 @@ import com.google.devtools.build.lib.packages.ImplicitOutputsFunction;
 import com.google.devtools.build.lib.packages.RuleClass;
 import com.google.devtools.build.lib.packages.RuleClass.Builder;
 import com.google.devtools.build.lib.rules.apple.AppleConfiguration;
+import com.google.devtools.build.lib.rules.objc.ObjcRuleClasses.IpaRule;
 
 /**
  * Rule definition for ios_application.
@@ -60,7 +61,7 @@ public class IosApplicationRule implements RuleDefinition {
         Any extensions to include in the final application.
         <!-- #END_BLAZE_RULE.ATTRIBUTE -->*/
         .add(attr("extensions", LABEL_LIST)
-            .allowedRuleClasses("ios_extension")
+            .allowedRuleClasses("ios_extension", "apple_watch1_extension")
             .allowedFileTypes()
             .direct_compile_time_input())
         .add(attr("$runner_script_template", LABEL).cfg(HOST)
@@ -75,8 +76,12 @@ public class IosApplicationRule implements RuleDefinition {
     return RuleDefinition.Metadata.builder()
         .name("ios_application")
         .factoryClass(IosApplication.class)
-        .ancestors(BaseRuleClasses.BaseRule.class, ObjcRuleClasses.ReleaseBundlingRule.class,
-            ObjcRuleClasses.XcodegenRule.class, ObjcRuleClasses.SimulatorRule.class)
+        .ancestors(
+            BaseRuleClasses.BaseRule.class,
+            ObjcRuleClasses.ReleaseBundlingRule.class,
+            ObjcRuleClasses.XcodegenRule.class,
+            ObjcRuleClasses.SimulatorRule.class,
+            IpaRule.class)
         .build();
   }
 }

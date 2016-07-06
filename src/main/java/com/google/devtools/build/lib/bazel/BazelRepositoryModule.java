@@ -17,7 +17,6 @@ package com.google.devtools.build.lib.bazel;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.devtools.build.lib.analysis.BlazeDirectories;
-import com.google.devtools.build.lib.analysis.BlazeVersionInfo;
 import com.google.devtools.build.lib.analysis.ConfiguredRuleClassProvider;
 import com.google.devtools.build.lib.analysis.RuleDefinition;
 import com.google.devtools.build.lib.bazel.commands.FetchCommand;
@@ -30,6 +29,8 @@ import com.google.devtools.build.lib.bazel.repository.MavenServerFunction;
 import com.google.devtools.build.lib.bazel.repository.MavenServerRepositoryFunction;
 import com.google.devtools.build.lib.bazel.repository.NewGitRepositoryFunction;
 import com.google.devtools.build.lib.bazel.repository.NewHttpArchiveFunction;
+import com.google.devtools.build.lib.bazel.repository.skylark.SkylarkRepositoryFunction;
+import com.google.devtools.build.lib.bazel.repository.skylark.SkylarkRepositoryModule;
 import com.google.devtools.build.lib.bazel.rules.android.AndroidNdkRepositoryFunction;
 import com.google.devtools.build.lib.bazel.rules.android.AndroidNdkRepositoryRule;
 import com.google.devtools.build.lib.bazel.rules.android.AndroidSdkRepositoryFunction;
@@ -53,9 +54,11 @@ import com.google.devtools.build.lib.rules.repository.RepositoryFunction;
 import com.google.devtools.build.lib.rules.repository.RepositoryLoaderFunction;
 import com.google.devtools.build.lib.runtime.BlazeCommand;
 import com.google.devtools.build.lib.runtime.BlazeModule;
+import com.google.devtools.build.lib.runtime.Command;
+import com.google.devtools.build.lib.runtime.CommandEnvironment;
 import com.google.devtools.build.lib.skyframe.SkyFunctions;
 import com.google.devtools.build.lib.skyframe.SkyValueDirtinessChecker;
-import com.google.devtools.build.lib.util.Clock;
+import com.google.devtools.build.lib.util.AbruptExitException;
 import com.google.devtools.build.lib.util.io.TimestampGranularityMonitor;
 import com.google.devtools.build.skyframe.SkyFunction;
 import com.google.devtools.build.skyframe.SkyFunctionName;
@@ -64,7 +67,6 @@ import com.google.devtools.build.skyframe.SkyValue;
 import com.google.devtools.common.options.OptionsProvider;
 
 import java.util.Map.Entry;
-import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import javax.annotation.Nullable;
@@ -77,9 +79,12 @@ public class BazelRepositoryModule extends BlazeModule {
   // A map of repository handlers that can be looked up by rule class name.
   private final ImmutableMap<String, RepositoryFunction> repositoryHandlers;
   private final AtomicBoolean isFetch = new AtomicBoolean(false);
+  private final SkylarkRepositoryFunction skylarkRepositoryFunction =
+      new SkylarkRepositoryFunction();
+  private final RepositoryDelegatorFunction delegator;
 
   public BazelRepositoryModule() {
-    repositoryHandlers =
+    this.repositoryHandlers =
         ImmutableMap.<String, RepositoryFunction>builder()
             .put(LocalRepositoryRule.NAME, new LocalRepositoryFunction())
             .put(HttpArchiveRule.NAME, new HttpArchiveFunction())
@@ -94,15 +99,8 @@ public class BazelRepositoryModule extends BlazeModule {
             .put(AndroidNdkRepositoryRule.NAME, new AndroidNdkRepositoryFunction())
             .put(MavenServerRule.NAME, new MavenServerRepositoryFunction())
             .build();
-  }
-
-  @Override
-  public void blazeStartup(OptionsProvider startupOptions,
-      BlazeVersionInfo versionInfo, UUID instanceId, BlazeDirectories directories,
-      Clock clock) {
-    for (RepositoryFunction handler : repositoryHandlers.values()) {
-      handler.setDirectories(directories);
-    }
+    this.delegator = new RepositoryDelegatorFunction(
+        repositoryHandlers, skylarkRepositoryFunction, isFetch);
   }
 
   /**
@@ -151,6 +149,7 @@ public class BazelRepositoryModule extends BlazeModule {
       }
       builder.addRuleDefinition(ruleDefinition);
     }
+    builder.addSkylarkModule(SkylarkRepositoryModule.class);
   }
 
   @Override
@@ -171,10 +170,14 @@ public class BazelRepositoryModule extends BlazeModule {
     // Create the repository function everything flows through.
     builder.put(SkyFunctions.REPOSITORY, new RepositoryLoaderFunction());
 
-    // Helper SkyFunctions.
-    builder.put(SkyFunctions.REPOSITORY_DIRECTORY,
-        new RepositoryDelegatorFunction(directories, repositoryHandlers, isFetch));
-    builder.put(MavenServerFunction.NAME, new MavenServerFunction(directories));
+    builder.put(SkyFunctions.REPOSITORY_DIRECTORY, delegator);
+    builder.put(MavenServerFunction.NAME, new MavenServerFunction());
     return builder.build();
+  }
+
+  @Override
+  public void beforeCommand(Command command, CommandEnvironment env) throws AbruptExitException {
+    delegator.setClientEnvironment(env.getClientEnv());
+    skylarkRepositoryFunction.setCommandEnvironment(env);
   }
 }

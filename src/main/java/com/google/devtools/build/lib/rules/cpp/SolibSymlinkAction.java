@@ -16,7 +16,7 @@ package com.google.devtools.build.lib.rules.cpp;
 
 import com.google.common.collect.ImmutableList;
 import com.google.devtools.build.lib.actions.AbstractAction;
-import com.google.devtools.build.lib.actions.Action;
+import com.google.devtools.build.lib.actions.ActionAnalysisMetadata;
 import com.google.devtools.build.lib.actions.ActionExecutionContext;
 import com.google.devtools.build.lib.actions.ActionExecutionException;
 import com.google.devtools.build.lib.actions.ActionOwner;
@@ -27,6 +27,7 @@ import com.google.devtools.build.lib.actions.ResourceSet;
 import com.google.devtools.build.lib.actions.Root;
 import com.google.devtools.build.lib.analysis.RuleContext;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
+import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.rules.cpp.LinkerInputs.LibraryToLink;
 import com.google.devtools.build.lib.util.Fingerprint;
 import com.google.devtools.build.lib.util.Preconditions;
@@ -44,8 +45,8 @@ import java.io.IOException;
  * Such symlinks are used by the linker to ensure that all rpath entries can be
  * specified relative to the $ORIGIN.
  */
+@Immutable
 public final class SolibSymlinkAction extends AbstractAction {
-
   private final Artifact library;
   private final Path target;
   private final Artifact symlink;
@@ -92,7 +93,7 @@ public final class SolibSymlinkAction extends AbstractAction {
 
   @Override
   public ResourceSet estimateResourceConsumption(Executor executor) {
-    return ResourceSet.createWithRamCpuIo(/*memoryMb=*/0, /*cpuUsage=*/0, /*ioUsage=*/0.0);
+    return ResourceSet.ZERO;
   }
 
   @Override
@@ -223,7 +224,7 @@ public final class SolibSymlinkAction extends AbstractAction {
   }
 
   @Override
-  public boolean shouldReportPathPrefixConflict(Action action) {
+  public boolean shouldReportPathPrefixConflict(ActionAnalysisMetadata action) {
     return false; // Always ignore path prefix conflict for the SolibSymlinkAction.
   }
 }

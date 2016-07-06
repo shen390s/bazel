@@ -95,7 +95,7 @@ EOF
 
   cat > zoo/dumper.sh <<EOF
 #!/bin/bash
-cat external/pandas/red/baby-panda
+cat ../pandas/red/baby-panda
 cat red/day-keeper
 EOF
   chmod +x zoo/dumper.sh
@@ -191,6 +191,10 @@ function test_new_local_repository_with_build_file() {
   do_new_local_repository_test "build_file"
 }
 
+function test_new_local_repository_with_labeled_build_file() {
+  do_new_local_repository_test "build_file+label"
+}
+
 function test_new_local_repository_with_build_file_content() {
   do_new_local_repository_test "build_file_content"
 }
@@ -218,8 +222,13 @@ public class Mongoose {
 }
 EOF
 
-  if [ "$1" == "build_file" ] ; then
+  if [ "$1" == "build_file" -o "$1" == "build_file+label" ] ; then
     build_file=BUILD.carnivore
+    build_file_str="${build_file}"
+    if [ "$1" == "build_file+label" ]; then
+      build_file_str="//:${build_file}"
+      cat > BUILD
+    fi
     cat > WORKSPACE <<EOF
 new_local_repository(
     name = 'endangered',
@@ -348,7 +357,7 @@ EOF
 }
 
 # Creates an indirect dependency on X from A and make sure the error message
-# refers to the correct label.
+# refers to the correct label, both in an external repository and not.
 function test_indirect_dep_message() {
   local external_dir=$TEST_TMPDIR/ext-dir
   mkdir -p a b $external_dir/x
@@ -391,6 +400,8 @@ java_library(
 )
 EOF
 
+  cp -r a b $external_dir
+
   touch $external_dir/WORKSPACE
   cat > $external_dir/x/X.java <<EOF
 package x;
@@ -418,7 +429,11 @@ EOF
 
   bazel build //a:a >& $TEST_log && fail "Building //a:a should error out"
   expect_log "** Please add the following dependencies:"
-  expect_log "@x_repo//x  to //a:a"
+  expect_log "@x_repo//x  to //a"
+
+  bazel build //a >& $TEST_log && fail "Building //a should error out"
+  expect_log "** Please add the following dependencies:"
+  expect_log "@x_repo//x  to //a"
 }
 
 function test_external_includes() {
@@ -488,6 +503,26 @@ EOF
   bazel query 'deps(//external:my_repo)' >& $TEST_log || fail "query failed"
   expect_log "//external:my_repo"
 }
+
+function test_override_workspace_file() {
+  local bar=$TEST_TMPDIR/bar
+  mkdir -p "$bar"
+  cat > "$bar/WORKSPACE" <<EOF
+workspace(name = "foo")
+EOF
+
+  cat > WORKSPACE <<EOF
+new_local_repository(
+    name = "bar",
+    path = "$bar",
+    build_file = "BUILD",
+)
+EOF
+  touch BUILD
+  bazel build @bar//... &> $TEST_log || fail "Build failed"
+  expect_not_log "Workspace name in .* does not match the name given in the repository's definition (@bar); this will cause a build error in future versions."
+}
+
 
 function test_overlaid_build_file() {
   local mutant=$TEST_TMPDIR/mutant

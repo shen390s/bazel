@@ -30,6 +30,7 @@ import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Ordering;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.cmdline.LabelSyntaxException;
+import com.google.devtools.build.lib.cmdline.PackageIdentifier;
 import com.google.devtools.build.lib.events.EventHandler;
 import com.google.devtools.build.lib.events.Location;
 import com.google.devtools.build.lib.packages.BuildType.SelectorList;
@@ -103,6 +104,9 @@ import javax.annotation.concurrent.Immutable;
 public final class RuleClass {
   public static final Function<? super Rule, Map<String, Label>> NO_EXTERNAL_BINDINGS =
         Functions.<Map<String, Label>>constant(ImmutableMap.<String, Label>of());
+
+  public static final PathFragment THIRD_PARTY_PREFIX = new PathFragment("third_party");
+
   /**
    * A constraint for the package name of the Rule instances.
    */
@@ -473,6 +477,7 @@ public final class RuleClass {
         PredicatesWithMessage.<Rule>alwaysTrue();
     private Predicate<String> preferredDependencyPredicate = Predicates.alwaysFalse();
     private List<Class<?>> advertisedProviders = new ArrayList<>();
+    private boolean canHaveAnyProvider = false;
     private BaseFunction configuredTargetFunction = null;
     private Function<? super Rule, Map<String, Label>> externalBindingsFunction =
         NO_EXTERNAL_BINDINGS;
@@ -559,14 +564,15 @@ public final class RuleClass {
       Preconditions.checkState(
           (type == RuleClassType.ABSTRACT)
           == (configuredTargetFactory == null && configuredTargetFunction == null));
-      Preconditions.checkState(skylarkExecutable == (configuredTargetFunction != null));
-      Preconditions.checkState(skylarkExecutable == (ruleDefinitionEnvironment != null));
-      Preconditions.checkState(workspaceOnly || externalBindingsFunction == NO_EXTERNAL_BINDINGS);
-
+      if (!workspaceOnly) {
+        Preconditions.checkState(skylarkExecutable == (configuredTargetFunction != null));
+        Preconditions.checkState(skylarkExecutable == (ruleDefinitionEnvironment != null));
+        Preconditions.checkState(externalBindingsFunction == NO_EXTERNAL_BINDINGS);
+      }
       return new RuleClass(name, skylark, skylarkExecutable, documented, publicByDefault,
           binaryOutput, workspaceOnly, outputsDefaultExecutable, implicitOutputsFunction,
           configurator, configuredTargetFactory, validityPredicate, preferredDependencyPredicate,
-          ImmutableSet.copyOf(advertisedProviders), configuredTargetFunction,
+          ImmutableSet.copyOf(advertisedProviders), canHaveAnyProvider, configuredTargetFunction,
           externalBindingsFunction, ruleDefinitionEnvironment, configurationFragmentPolicy.build(),
           supportsConstraintChecking, attributes.values().toArray(new Attribute[0]));
     }
@@ -721,7 +727,18 @@ public final class RuleClass {
      * not be evaluated for the rule.
      */
     public Builder advertiseProvider(Class<?>... providers) {
+      Preconditions.checkState(!canHaveAnyProvider);
       Collections.addAll(advertisedProviders, providers);
+      return this;
+    }
+
+    /**
+     * Set if the rule can have any provider. This is true for "alias" rules like
+     * <code>bind</code> .
+     */
+    public Builder canHaveAnyProvider() {
+      Preconditions.checkState(advertisedProviders.isEmpty());
+      canHaveAnyProvider = true;
       return this;
     }
 
@@ -962,6 +979,8 @@ public final class RuleClass {
    */
   private final ImmutableSet<Class<?>> advertisedProviders;
 
+  private final boolean canHaveAnyProvider;
+
   /**
    * The Skylark rule implementation of this RuleClass. Null for non Skylark executable RuleClasses.
    */
@@ -1007,6 +1026,7 @@ public final class RuleClass {
       PredicateWithMessage<Rule> validityPredicate,
       Predicate<String> preferredDependencyPredicate,
       ImmutableSet<Class<?>> advertisedProviders,
+      boolean canHaveAnyProvider,
       @Nullable BaseFunction configuredTargetFunction,
       Function<? super Rule, Map<String, Label>> externalBindingsFunction,
       @Nullable Environment ruleDefinitionEnvironment,
@@ -1028,6 +1048,7 @@ public final class RuleClass {
         validityPredicate,
         preferredDependencyPredicate,
         advertisedProviders,
+        canHaveAnyProvider,
         configuredTargetFunction,
         externalBindingsFunction,
         ruleDefinitionEnvironment,
@@ -1070,6 +1091,7 @@ public final class RuleClass {
       ConfiguredTargetFactory<?, ?> configuredTargetFactory,
       PredicateWithMessage<Rule> validityPredicate, Predicate<String> preferredDependencyPredicate,
       ImmutableSet<Class<?>> advertisedProviders,
+      boolean canHaveAnyProvider,
       @Nullable BaseFunction configuredTargetFunction,
       Function<? super Rule, Map<String, Label>> externalBindingsFunction,
       @Nullable Environment ruleDefinitionEnvironment,
@@ -1089,6 +1111,7 @@ public final class RuleClass {
     this.validityPredicate = validityPredicate;
     this.preferredDependencyPredicate = preferredDependencyPredicate;
     this.advertisedProviders = advertisedProviders;
+    this.canHaveAnyProvider = canHaveAnyProvider;
     this.configuredTargetFunction = configuredTargetFunction;
     this.externalBindingsFunction = externalBindingsFunction;
     this.ruleDefinitionEnvironment = ruleDefinitionEnvironment;
@@ -1264,6 +1287,14 @@ public final class RuleClass {
   }
 
   /**
+   * Returns true if this rule, when analyzed, can provide any provider. Used for "alias" rules,
+   * e.g. <code>bind()</code>.
+   */
+  public boolean canHaveAnyProvider() {
+    return canHaveAnyProvider;
+  }
+
+  /**
    * For --compile_one_dependency: if multiple rules consume the specified target,
    * should we choose this one over the "unpreferred" options?
    */
@@ -1312,6 +1343,7 @@ public final class RuleClass {
       throws LabelSyntaxException, InterruptedException {
     Rule rule = pkgBuilder.createRule(ruleLabel, this, location, attributeContainer);
     populateRuleAttributeValues(rule, pkgBuilder, attributeValues, eventHandler);
+    checkAspectAllowedValues(rule, eventHandler);
     rule.populateOutputFiles(eventHandler, pkgBuilder);
     if (ast != null) {
       populateAttributeLocations(rule, ast);
@@ -1396,7 +1428,6 @@ public final class RuleClass {
       boolean explicit = attributeValues.isAttributeExplicitlySpecified(attributeName);
       setRuleAttributeValue(rule, eventHandler, attr, nativeAttributeValue, explicit);
       definedAttrIndices.set(attrIndex);
-      checkAttrValNonEmpty(rule, eventHandler, attributeValue, attr);
     }
     return definedAttrIndices;
   }
@@ -1452,7 +1483,6 @@ public final class RuleClass {
         attrsWithComputedDefaults.add(attr);
       } else {
         Object defaultValue = getAttributeNoncomputedDefaultValue(attr, pkgBuilder);
-        checkAttrValNonEmpty(rule, eventHandler, defaultValue, attr);
         rule.setAttributeValue(attr, defaultValue, /*explicit=*/ false);
         checkAllowedValues(rule, attr, eventHandler);
       }
@@ -1495,26 +1525,27 @@ public final class RuleClass {
         /*explicit=*/false);
   }
 
-  private void checkAttrValNonEmpty(
-      Rule rule, EventHandler eventHandler, Object attributeValue, Attribute attr) {
-    if (!attr.isNonEmpty()) {
-      return;
-    }
+  public void checkAttributesNonEmpty(
+      Rule rule, RuleErrorConsumer ruleErrorConsumer, AttributeMap attributes) {
+    for (String attributeName : attributes.getAttributeNames()) {
+      Attribute attr = attributes.getAttributeDefinition(attributeName);
+      if (!attr.isNonEmpty()) {
+        continue;
+      }
+      Object attributeValue = attributes.get(attributeName, attr.getType());
 
-    boolean isEmpty = false;
+      boolean isEmpty = false;
+      if (attributeValue instanceof SkylarkList) {
+        isEmpty = ((SkylarkList) attributeValue).isEmpty();
+      } else if (attributeValue instanceof List<?>) {
+        isEmpty = ((List<?>) attributeValue).isEmpty();
+      } else if (attributeValue instanceof Map<?, ?>) {
+        isEmpty = ((Map<?, ?>) attributeValue).isEmpty();
+      }
 
-    if (attributeValue instanceof SkylarkList) {
-      isEmpty = ((SkylarkList) attributeValue).isEmpty();
-    } else if (attributeValue instanceof List<?>) {
-      isEmpty = ((List<?>) attributeValue).isEmpty();
-    } else if (attributeValue instanceof Map<?, ?>) {
-      isEmpty = ((Map<?, ?>) attributeValue).isEmpty();
-    }
-
-    if (isEmpty) {
-      rule.reportError(rule.getLabel() + ": non empty attribute '" + attr.getName()
-          + "' in '" + name + "' rule '" + rule.getLabel() + "' has to have at least one value",
-          eventHandler);
+      if (isEmpty) {
+        ruleErrorConsumer.attributeError(attr.getName(), "attribute must be non empty");
+      }
     }
   }
 
@@ -1539,7 +1570,7 @@ public final class RuleClass {
    */
   private static void checkThirdPartyRuleHasLicense(Rule rule,
       Package.Builder pkgBuilder, EventHandler eventHandler) {
-    if (rule.getLabel().getPackageName().startsWith("third_party/")) {
+    if (isThirdPartyPackage(rule.getLabel().getPackageIdentifier())) {
       License license = rule.getLicense();
       if (license == null) {
         license = pkgBuilder.getDefaultLicense();
@@ -1711,6 +1742,30 @@ public final class RuleClass {
     }
   }
 
+  private static void checkAspectAllowedValues(
+      Rule rule, EventHandler eventHandler) {
+    for (Attribute attrOfRule : rule.getAttributes()) {
+      for (Aspect aspect : attrOfRule.getAspects(rule)) {
+        for (Attribute attrOfAspect : aspect.getDefinition().getAttributes().values()) {
+          // By this point the AspectDefinition has been created and values assigned.
+          if (attrOfAspect.checkAllowedValues()) {
+            PredicateWithMessage<Object> allowedValues = attrOfAspect.getAllowedValues();
+            Object value = attrOfAspect.getDefaultValue(rule);
+            if (!allowedValues.apply(value)) {
+              rule.reportError(
+                  String.format(
+                      "%s: invalid value in '%s' attribute: %s",
+                      rule.getLabel(),
+                      attrOfAspect.getName(),
+                      allowedValues.getErrorReason(value)),
+                  eventHandler);
+            }
+          }
+        }
+      }
+    }
+  }
+
   @Override
   public String toString() {
     return name;
@@ -1776,5 +1831,21 @@ public final class RuleClass {
    */
   public boolean outputsDefaultExecutable() {
     return outputsDefaultExecutable;
+  }
+
+  public static boolean isThirdPartyPackage(PackageIdentifier packageIdentifier) {
+    if (!packageIdentifier.getRepository().isMain()) {
+      return false;
+    }
+
+    if (!packageIdentifier.getPackageFragment().startsWith(THIRD_PARTY_PREFIX)) {
+      return false;
+    }
+
+    if (packageIdentifier.getPackageFragment().segmentCount() <= 1) {
+      return false;
+    }
+
+    return true;
   }
 }

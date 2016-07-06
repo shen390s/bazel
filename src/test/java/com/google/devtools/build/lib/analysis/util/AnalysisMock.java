@@ -14,7 +14,6 @@
 package com.google.devtools.build.lib.analysis.util;
 
 import com.google.common.collect.ImmutableMap;
-import com.google.devtools.build.lib.analysis.BlazeDirectories;
 import com.google.devtools.build.lib.analysis.ConfigurationCollectionFactory;
 import com.google.devtools.build.lib.analysis.config.ConfigurationFactory;
 import com.google.devtools.build.lib.packages.util.MockCcSupport;
@@ -79,16 +78,16 @@ public abstract class AnalysisMock {
     get().ccSupport().setup(config);
   }
 
-  public ImmutableMap<SkyFunctionName, SkyFunction> getSkyFunctions(BlazeDirectories directories) {
+  public ImmutableMap<SkyFunctionName, SkyFunction> getSkyFunctions() {
     // Some tests require the local_repository rule so we need the appropriate SkyFunctions.
     RepositoryFunction localRepositoryFunction = new LocalRepositoryFunction();
-    localRepositoryFunction.setDirectories(directories);
     ImmutableMap<String, RepositoryFunction> repositoryHandlers = ImmutableMap.of(
         LocalRepositoryRule.NAME, localRepositoryFunction);
 
     return ImmutableMap.of(
         SkyFunctions.REPOSITORY_DIRECTORY,
-        new RepositoryDelegatorFunction(directories, repositoryHandlers, new AtomicBoolean(true)),
+        new RepositoryDelegatorFunction(
+            repositoryHandlers, null, new AtomicBoolean(true)),
         SkyFunctions.REPOSITORY,
         new RepositoryLoaderFunction());
   }
@@ -135,5 +134,9 @@ public abstract class AnalysisMock {
       return delegate.getOptionOverrides();
     }
 
+    @Override
+    public ImmutableMap<SkyFunctionName, SkyFunction> getSkyFunctions() {
+      return delegate.getSkyFunctions();
+    }
   }
 }

@@ -56,7 +56,7 @@ public class WorkerModule extends BlazeModule {
     env.getEventBus().register(this);
 
     if (workers == null) {
-      Path logDir = env.getRuntime().getOutputBase().getRelative("worker-logs");
+      Path logDir = env.getOutputBase().getRelative("worker-logs");
       try {
         logDir.createDirectory();
       } catch (IOException e) {
@@ -112,8 +112,7 @@ public class WorkerModule extends BlazeModule {
     Preconditions.checkNotNull(workers);
 
     return ImmutableList.<ActionContextProvider>of(
-        new WorkerActionContextProvider(
-            env.getRuntime(), buildRequest, workers, env.getEventBus()));
+        new WorkerActionContextProvider(env, buildRequest, workers));
   }
 
   @Override
@@ -123,7 +122,9 @@ public class WorkerModule extends BlazeModule {
 
   @Subscribe
   public void buildComplete(BuildCompleteEvent event) {
-    if (workers != null && buildRequest.getOptions(WorkerOptions.class).workerQuitAfterBuild) {
+    if (workers != null && buildRequest != null
+        && buildRequest.getOptions(WorkerOptions.class) != null
+        && buildRequest.getOptions(WorkerOptions.class).workerQuitAfterBuild) {
       if (verbose) {
         env
             .getReporter()

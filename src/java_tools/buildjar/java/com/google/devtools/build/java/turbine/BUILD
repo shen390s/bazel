@@ -8,6 +8,7 @@ package(default_visibility = [":packages"])
 java_binary(
     name = "turbine",
     main_class = "com.google.devtools.build.java.turbine.javac.JavacTurbine",
+    visibility = ["//visibility:public"],
     runtime_deps = [
         "//src/java_tools/buildjar/java/com/google/devtools/build/java/turbine/javac:javac_turbine",
     ],
@@ -30,4 +31,10 @@ java_library(
         "//third_party:guava",
         "//third_party:jsr305",
     ],
+)
+
+filegroup(
+    name = "srcs",
+    srcs = glob(["**"]) + ["//src/java_tools/buildjar/java/com/google/devtools/build/java/turbine/javac:srcs"],
+    visibility = ["//src/java_tools/buildjar:__pkg__"],
 )

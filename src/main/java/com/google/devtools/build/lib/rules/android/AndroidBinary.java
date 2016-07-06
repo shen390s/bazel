@@ -13,9 +13,11 @@
 // limitations under the License.
 package com.google.devtools.build.lib.rules.android;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Strings.isNullOrEmpty;
 
 import com.google.common.base.Optional;
+import com.google.common.base.Predicate;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
@@ -39,6 +41,7 @@ import com.google.devtools.build.lib.analysis.actions.CustomCommandLine;
 import com.google.devtools.build.lib.analysis.actions.SpawnAction;
 import com.google.devtools.build.lib.analysis.actions.SpawnAction.Builder;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
+import com.google.devtools.build.lib.collect.IterablesChain;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.collect.nestedset.Order;
@@ -46,6 +49,7 @@ import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.packages.BuildType;
 import com.google.devtools.build.lib.packages.TriState;
 import com.google.devtools.build.lib.rules.RuleConfiguredTargetFactory;
+import com.google.devtools.build.lib.rules.android.AndroidConfiguration.AndroidBinaryType;
 import com.google.devtools.build.lib.rules.android.AndroidRuleClasses.MultidexMode;
 import com.google.devtools.build.lib.rules.cpp.CcToolchainProvider;
 import com.google.devtools.build.lib.rules.cpp.CppHelper;
@@ -69,6 +73,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import javax.annotation.Nullable;
+
 /**
  * An implementation for the "android_binary" rule.
  */
@@ -90,6 +96,7 @@ public abstract class AndroidBinary implements RuleConfiguredTargetFactory {
         ruleContext.getPrerequisites("deps", Mode.TARGET));
     JavaCommon javaCommon = new JavaCommon(
         ruleContext, javaSemantics, deps, deps, deps);
+    javaSemantics.checkRule(ruleContext, javaCommon);
 
     AndroidCommon androidCommon = new AndroidCommon(
         javaCommon, true /* asNeverLink */, true /* exportDeps */);
@@ -104,8 +111,7 @@ public abstract class AndroidBinary implements RuleConfiguredTargetFactory {
         javaCommon,
         androidCommon,
         javaSemantics,
-        androidSemantics,
-        ImmutableList.<String>of("deps"));
+        androidSemantics);
     if (builder == null) {
       return null;
     }
@@ -119,8 +125,7 @@ public abstract class AndroidBinary implements RuleConfiguredTargetFactory {
       JavaCommon javaCommon,
       AndroidCommon androidCommon,
       JavaSemantics javaSemantics,
-      AndroidSemantics androidSemantics,
-      List<String> depsAttributes) throws InterruptedException {
+      AndroidSemantics androidSemantics) throws InterruptedException {
 
     if (getMultidexMode(ruleContext) != MultidexMode.LEGACY
         && ruleContext.attributes().isAttributeValueExplicitlySpecified(
@@ -146,17 +151,13 @@ public abstract class AndroidBinary implements RuleConfiguredTargetFactory {
         MultimapBuilder.treeKeys().arrayListValues().build();
     AndroidConfiguration config = ruleContext.getFragment(AndroidConfiguration.class);
     if (config.isFatApk()) {
-      for (String depsAttribute : depsAttributes) {
-        for (Map.Entry<String, ? extends List<? extends TransitiveInfoCollection>> entry :
-            ruleContext.getSplitPrerequisites(depsAttribute).entrySet()) {
-          depsByArchitecture.putAll(entry.getKey(), entry.getValue());
-        }
+      for (Map.Entry<String, ? extends List<? extends TransitiveInfoCollection>> entry :
+          ruleContext.getSplitPrerequisites("deps").entrySet()) {
+        depsByArchitecture.putAll(entry.getKey(), entry.getValue());
       }
     } else {
-      for (String depsAttribute : depsAttributes) {
-        depsByArchitecture.putAll(
-            config.getCpu(), ruleContext.getPrerequisites(depsAttribute, Mode.TARGET));
-      }
+      depsByArchitecture.putAll(
+          config.getCpu(), ruleContext.getPrerequisites("deps", Mode.TARGET));
     }
     Map<String, BuildConfiguration> configurationMap = new LinkedHashMap<>();
     Map<String, CcToolchainProvider> toolchainMap = new LinkedHashMap<>();
@@ -195,22 +196,45 @@ public abstract class AndroidBinary implements RuleConfiguredTargetFactory {
         return null;
       }
 
+      String applicationId = ruleContext.attributes().get("application_id", Type.STRING);
+      String versionCode = getExpandedMakeVarsForAttr(ruleContext, "version_code");
+      String versionName = getExpandedMakeVarsForAttr(ruleContext, "version_name");
+      Map<String, String> manifestValues =
+          ruleContext.attributes().get("manifest_values", Type.STRING_DICT);
+      if (manifestValues != null) {
+        if (manifestValues.containsKey("applicationId")) {
+          applicationId = manifestValues.get("applicationId");
+        }
+        if (manifestValues.containsKey("versionCode")) {
+          versionCode = ruleContext.expandMakeVariables("manifest_values",
+              manifestValues.get("versionCode"));
+        }
+        if (manifestValues.containsKey("versionName")) {
+          versionName = ruleContext.expandMakeVariables("manifest_values",
+              manifestValues.get("versionName"));
+        }
+      }
+
       applicationManifest = ruleManifest.mergeWith(ruleContext, resourceDeps);
       resourceApk = applicationManifest.packWithDataAndResources(
           ruleContext.getImplicitOutputArtifact(AndroidRuleClasses.ANDROID_RESOURCES_APK),
           ruleContext,
+          false, /* isLibrary */
           resourceDeps,
-          null, /* Artifact rTxt */
+          ruleContext.getImplicitOutputArtifact(AndroidRuleClasses.ANDROID_R_TXT),
           null, /* Artifact symbolsTxt */
           ruleContext.getTokenizedStringListAttr("resource_configuration_filters"),
           ruleContext.getTokenizedStringListAttr("nocompress_extensions"),
+          ruleContext.attributes().get("crunch_png", Type.BOOLEAN),
           ruleContext.getTokenizedStringListAttr("densities"),
-          ruleContext.attributes().get("application_id", Type.STRING),
-          getExpandedMakeVarsForAttr(ruleContext, "version_code"),
-          getExpandedMakeVarsForAttr(ruleContext, "version_name"),
+          applicationId,
+          versionCode,
+          versionName,
           false, /* incremental */
           ProguardHelper.getProguardConfigArtifact(ruleContext, ""),
-          null /* manifestOut */);
+          createMainDexProguardSpec(ruleContext),
+          ruleContext.getImplicitOutputArtifact(AndroidRuleClasses.ANDROID_PROCESSED_MANIFEST),
+          ruleContext.getImplicitOutputArtifact(AndroidRuleClasses.ANDROID_RESOURCES_ZIP));
       if (ruleContext.hasErrors()) {
         return null;
       }
@@ -218,18 +242,22 @@ public abstract class AndroidBinary implements RuleConfiguredTargetFactory {
           .packWithDataAndResources(ruleContext
                   .getImplicitOutputArtifact(AndroidRuleClasses.ANDROID_INCREMENTAL_RESOURCES_APK),
               ruleContext,
+              false, /* isLibrary */
               resourceDeps,
               null, /* Artifact rTxt */
               null, /* Artifact symbolsTxt */
               ruleContext.getTokenizedStringListAttr("resource_configuration_filters"),
               ruleContext.getTokenizedStringListAttr("nocompress_extensions"),
+              ruleContext.attributes().get("crunch_png", Type.BOOLEAN),
               ruleContext.getTokenizedStringListAttr("densities"),
-              ruleContext.attributes().get("application_id", Type.STRING),
-              getExpandedMakeVarsForAttr(ruleContext, "version_code"),
-              getExpandedMakeVarsForAttr(ruleContext, "version_name"),
+              applicationId,
+              versionCode,
+              versionName,
               true, /* incremental */
               ProguardHelper.getProguardConfigArtifact(ruleContext, "incremental"),
-              null /* manifestOut */);
+              null, /* mainDexProguardCfg */
+              null, /* manifestOut */
+              null /* mergedResourcesOut */);
       if (ruleContext.hasErrors()) {
         return null;
       }
@@ -237,22 +265,32 @@ public abstract class AndroidBinary implements RuleConfiguredTargetFactory {
           .createSplitManifest(ruleContext, "android_resources", false)
           .packWithDataAndResources(getDxArtifact(ruleContext, "android_resources.ap_"),
               ruleContext,
+              false, /* isLibrary */
               resourceDeps,
               null, /* Artifact rTxt */
               null, /* Artifact symbolsTxt */
               ruleContext.getTokenizedStringListAttr("resource_configuration_filters"),
               ruleContext.getTokenizedStringListAttr("nocompress_extensions"),
+              ruleContext.attributes().get("crunch_png", Type.BOOLEAN),
               ruleContext.getTokenizedStringListAttr("densities"),
-              ruleContext.attributes().get("application_id", Type.STRING),
-              getExpandedMakeVarsForAttr(ruleContext, "version_code"),
-              getExpandedMakeVarsForAttr(ruleContext, "version_name"),
-              true,
+              applicationId,
+              versionCode,
+              versionName,
+              true, /* incremental */
               ProguardHelper.getProguardConfigArtifact(ruleContext, "incremental_split"),
-              null /* manifestOut */);
+              null, /* mainDexProguardCfg */
+              null, /* manifestOut */
+              null /* mergedResourcesOut */);
       if (ruleContext.hasErrors()) {
         return null;
       }
     } else {
+      if (!ruleContext.attributes().get("crunch_png", Type.BOOLEAN)) {
+        ruleContext.ruleError("Setting crunch_png = 0 is not supported for android_binary"
+            + " rules which depend on android_resources rules.");
+        return null;
+      }
+
       // Retrieve the resources from the resources attribute on the android_binary rule
       // and recompile them if necessary.
       ApplicationManifest resourcesManifest = ApplicationManifest.fromResourcesRule(ruleContext);
@@ -267,10 +305,12 @@ public abstract class AndroidBinary implements RuleConfiguredTargetFactory {
             ruleContext,
             resourceDeps,
             true,
-            ProguardHelper.getProguardConfigArtifact(ruleContext, ""));
+            ProguardHelper.getProguardConfigArtifact(ruleContext, ""),
+            createMainDexProguardSpec(ruleContext));
       } else {
         resourceApk = applicationManifest.useCurrentResources(ruleContext,
-            ProguardHelper.getProguardConfigArtifact(ruleContext, ""));
+            ProguardHelper.getProguardConfigArtifact(ruleContext, ""),
+            createMainDexProguardSpec(ruleContext));
       }
       incrementalResourceApk = applicationManifest
           .addStubApplication(ruleContext)
@@ -280,7 +320,8 @@ public abstract class AndroidBinary implements RuleConfiguredTargetFactory {
               ruleContext,
               resourceDeps,
               false,
-              ProguardHelper.getProguardConfigArtifact(ruleContext, "incremental"));
+              ProguardHelper.getProguardConfigArtifact(ruleContext, "incremental"),
+              null /* mainDexProguardConfig */);
       if (ruleContext.hasErrors()) {
         return null;
       }
@@ -291,7 +332,8 @@ public abstract class AndroidBinary implements RuleConfiguredTargetFactory {
             ruleContext,
             resourceDeps,
             false,
-            ProguardHelper.getProguardConfigArtifact(ruleContext, "incremental_split"));
+            ProguardHelper.getProguardConfigArtifact(ruleContext, "incremental_split"),
+            null /* mainDexProguardConfig */);
       if (ruleContext.hasErrors()) {
         return null;
       }
@@ -318,6 +360,7 @@ public abstract class AndroidBinary implements RuleConfiguredTargetFactory {
         ruleContext,
         filesBuilder,
         deployJar,
+        /* isBinaryJarFiltered */ false,
         javaCommon,
         androidCommon,
         javaSemantics,
@@ -329,6 +372,7 @@ public abstract class AndroidBinary implements RuleConfiguredTargetFactory {
         splitResourceApk,
         resourceClasses,
         ImmutableList.<Artifact>of(),
+        ImmutableList.<Artifact>of(),
         proguardMapping);
   }
 
@@ -336,7 +380,8 @@ public abstract class AndroidBinary implements RuleConfiguredTargetFactory {
   public static RuleConfiguredTargetBuilder createAndroidBinary(
       RuleContext ruleContext,
       NestedSetBuilder<Artifact> filesBuilder,
-      Artifact deployJar,
+      Artifact binaryJar,
+      boolean isBinaryJarFiltered,
       JavaCommon javaCommon,
       AndroidCommon androidCommon,
       JavaSemantics javaSemantics,
@@ -348,15 +393,23 @@ public abstract class AndroidBinary implements RuleConfiguredTargetFactory {
       ResourceApk splitResourceApk,
       JavaTargetAttributes resourceClasses,
       ImmutableList<Artifact> apksUnderTest,
+      ImmutableList<Artifact> additionalMergedManifests,
       Artifact proguardMapping) throws InterruptedException {
+
     ImmutableList<Artifact> proguardSpecs = ProguardHelper.collectTransitiveProguardSpecs(
         ruleContext, ImmutableList.of(resourceApk.getResourceProguardConfig()));
 
+    Artifact resourceApkArtifact = shrinkResources(
+        ruleContext,
+        androidCommon,
+        resourceApk,
+        binaryJar,
+        proguardSpecs);
     ProguardOutput proguardOutput =
         applyProguard(
             ruleContext,
             androidCommon,
-            deployJar,
+            binaryJar,
             filesBuilder,
             proguardSpecs,
             proguardMapping);
@@ -366,11 +419,11 @@ public abstract class AndroidBinary implements RuleConfiguredTargetFactory {
             ? dexWithJack(ruleContext, androidCommon, proguardSpecs)
             : dex(
                 ruleContext,
-                getMultidexMode(ruleContext),
-                ruleContext.getTokenizedStringListAttr("dexopts"),
-                deployJar,
+                binaryJar,
                 jarToDex,
+                isBinaryJarFiltered,
                 androidCommon,
+                resourceApk.getMainDexProguardConfig(),
                 resourceClasses);
     if (dexingOutput == null) {
       return null;
@@ -383,7 +436,7 @@ public abstract class AndroidBinary implements RuleConfiguredTargetFactory {
 
     ApkActionBuilder apkBuilder = new ApkActionBuilder(ruleContext, androidSemantics)
         .classesDex(dexingOutput.classesDexZip)
-        .resourceApk(resourceApk.getArtifact())
+        .resourceApk(resourceApkArtifact)
         .javaResourceZip(dexingOutput.javaResourceJar)
         .nativeLibs(nativeLibs);
 
@@ -402,11 +455,17 @@ public abstract class AndroidBinary implements RuleConfiguredTargetFactory {
         ruleContext.getImplicitOutputArtifact(AndroidRuleClasses.ANDROID_BINARY_APK));
 
     // Don't add blacklistedApk, so it's only built if explicitly requested.
-    filesBuilder.add(deployJar);
+    filesBuilder.add(binaryJar);
     filesBuilder.add(unsignedApk);
     filesBuilder.add(zipAlignedApk);
-
     NestedSet<Artifact> filesToBuild = filesBuilder.build();
+
+    Artifact deployInfo = ruleContext.getImplicitOutputArtifact(AndroidRuleClasses.DEPLOY_INFO);
+    AndroidDeployInfoAction.createDeployInfoAction(ruleContext,
+        deployInfo,
+        applicationManifest.getManifest(),
+        additionalMergedManifests,
+        Iterables.concat(ImmutableList.of(zipAlignedApk), apksUnderTest));
 
     NestedSet<Artifact> coverageMetadata = (androidCommon.getInstrumentedJar() != null)
         ? NestedSetBuilder.create(Order.STABLE_ORDER, androidCommon.getInstrumentedJar())
@@ -474,6 +533,25 @@ public abstract class AndroidBinary implements RuleConfiguredTargetFactory {
         incrementalApk,
         nativeLibs,
         stubData);
+
+    Artifact incrementalDeployInfo = ruleContext.getImplicitOutputArtifact(
+        AndroidRuleClasses.DEPLOY_INFO_INCREMENTAL);
+
+    AndroidDeployInfoAction.createDeployInfoAction(ruleContext,
+        incrementalDeployInfo,
+        applicationManifest.getManifest(),
+        additionalMergedManifests,
+        ImmutableList.<Artifact>of());
+
+    NestedSet<Artifact> fullInstallOutputGroup = NestedSetBuilder.<Artifact>stableOrder()
+        .add(fullDeployMarker)
+        .add(incrementalDeployInfo)
+        .build();
+
+    NestedSet<Artifact> incrementalInstallOutputGroup = NestedSetBuilder.<Artifact>stableOrder()
+        .add(incrementalDeployMarker)
+        .add(incrementalDeployInfo)
+        .build();
 
     NestedSetBuilder<Artifact> splitApkSetBuilder = NestedSetBuilder.compileOrder();
 
@@ -556,10 +634,42 @@ public abstract class AndroidBinary implements RuleConfiguredTargetFactory {
     createSplitInstallAction(ruleContext, splitDeployMarker, argsArtifact, splitMainApk,
         splitApks, stubData);
 
-    NestedSet<Artifact> splitOutputGroup = NestedSetBuilder.<Artifact>stableOrder()
+    Artifact splitDeployInfo = ruleContext.getImplicitOutputArtifact(
+        AndroidRuleClasses.DEPLOY_INFO_SPLIT);
+    AndroidDeployInfoAction.createDeployInfoAction(
+        ruleContext,
+        splitDeployInfo,
+        applicationManifest.getManifest(),
+        additionalMergedManifests,
+        ImmutableList.<Artifact>of());
+
+    NestedSet<Artifact> splitInstallOutputGroup = NestedSetBuilder.<Artifact>stableOrder()
         .addTransitive(allSplitApks)
         .add(splitDeployMarker)
+        .add(splitDeployInfo)
         .build();
+
+    Artifact apkManifest =
+        ruleContext.getImplicitOutputArtifact(AndroidRuleClasses.APK_MANIFEST);
+    createApkManifestAction(
+        ruleContext,
+        apkManifest,
+        false, // text proto
+        androidCommon,
+        resourceClasses,
+        resourceApk,
+        nativeLibs);
+
+    Artifact apkManifestText =
+        ruleContext.getImplicitOutputArtifact(AndroidRuleClasses.APK_MANIFEST_TEXT);
+    createApkManifestAction(
+        ruleContext,
+        apkManifestText,
+        true, // text proto
+        androidCommon,
+        resourceClasses,
+        resourceApk,
+        nativeLibs);
 
     androidCommon.addTransitiveInfoProviders(
         builder, androidSemantics, resourceApk, zipAlignedApk, apksUnderTest);
@@ -576,7 +686,9 @@ public abstract class AndroidBinary implements RuleConfiguredTargetFactory {
         .add(
             RunfilesProvider.class,
             RunfilesProvider.simple(
-                new Runfiles.Builder(ruleContext.getWorkspaceName())
+                new Runfiles.Builder(
+                    ruleContext.getWorkspaceName(),
+                    ruleContext.getConfiguration().legacyExternalRunfiles())
                     .addRunfiles(ruleContext, RunfilesProvider.DEFAULT_RUNFILES)
                     .addTransitiveArtifacts(filesToBuild)
                     .build()))
@@ -586,11 +698,17 @@ public abstract class AndroidBinary implements RuleConfiguredTargetFactory {
         .add(
             ApkProvider.class,
             new ApkProvider(
-                NestedSetBuilder.create(Order.STABLE_ORDER, zipAlignedApk), coverageMetadata))
+                NestedSetBuilder.create(Order.STABLE_ORDER, zipAlignedApk),
+                coverageMetadata,
+                NestedSetBuilder.create(Order.STABLE_ORDER, applicationManifest.getManifest())
+            ))
         .add(AndroidPreDexJarProvider.class, new AndroidPreDexJarProvider(jarToDex))
-        .addOutputGroup("mobile_install_full", fullDeployMarker)
-        .addOutputGroup("mobile_install_incremental", incrementalDeployMarker)
-        .addOutputGroup("mobile_install_split", splitOutputGroup);
+        .addOutputGroup("mobile_install_full", fullInstallOutputGroup)
+        .addOutputGroup("mobile_install_incremental", incrementalInstallOutputGroup)
+        .addOutputGroup("mobile_install_split", splitInstallOutputGroup)
+        .addOutputGroup("apk_manifest", apkManifest)
+        .addOutputGroup("apk_manifest_text", apkManifestText)
+        .addOutputGroup("android_deploy_info", deployInfo);
   }
 
   private static void createSplitInstallAction(RuleContext ruleContext,
@@ -714,6 +832,32 @@ public abstract class AndroidBinary implements RuleConfiguredTargetFactory {
     return stubDex;
   }
 
+  private static void createApkManifestAction(
+      RuleContext ruleContext,
+      Artifact apkManfiest,
+      boolean textProto,
+      AndroidCommon androidCommon,
+      JavaTargetAttributes resourceClasses,
+      ResourceApk resourceApk,
+      NativeLibs nativeLibs) {
+
+    Iterable<Artifact> jars = IterablesChain.concat(
+        resourceClasses.getArchiveInputs(true), androidCommon.getRuntimeJars());
+
+    AndroidSdkProvider sdk = AndroidSdkProvider.fromRuleContext(ruleContext);
+
+    ApkManifestAction manifestAction = new ApkManifestAction(
+        ruleContext.getActionOwner(),
+        apkManfiest,
+        textProto,
+        sdk,
+        jars,
+        resourceApk,
+        nativeLibs);
+
+    ruleContext.registerAction(manifestAction);
+  }
+
   /** Generates an uncompressed _deploy.jar of all the runtime jars. */
   public static Artifact createDeployJar(
       RuleContext ruleContext, JavaSemantics javaSemantics, AndroidCommon common,
@@ -768,18 +912,35 @@ public abstract class AndroidBinary implements RuleConfiguredTargetFactory {
         .add(sdk.getAndroidJar())
         .addTransitive(common.getTransitiveNeverLinkLibraries())
         .build();
-    ProguardOutput result = ProguardHelper.createProguardAction(ruleContext, sdk.getProguard(),
-        deployJarArtifact, proguardSpecs, proguardMapping, libraryJars, proguardOutputJar,
-        ruleContext.attributes().get("proguard_generate_mapping", Type.BOOLEAN));
+    ProguardOutput result = ProguardHelper.createProguardAction(
+        ruleContext,
+        sdk.getProguard(),
+        deployJarArtifact,
+        proguardSpecs,
+        proguardMapping,
+        libraryJars,
+        proguardOutputJar,
+        ruleContext.attributes().get("proguard_generate_mapping", Type.BOOLEAN),
+        getProguardOptimizationPasses(ruleContext));
     // Since Proguard is being run, add its output artifacts to the given filesBuilder
     result.addAllToSet(filesBuilder);
     return result;
   }
 
+  @Nullable
+  private static Integer getProguardOptimizationPasses(RuleContext ruleContext) {
+    if (ruleContext.attributes().has("proguard_optimization_passes", Type.INTEGER)) {
+      return ruleContext.attributes().get("proguard_optimization_passes", Type.INTEGER);
+    } else {
+      return null;
+    }
+  }
+
   private static ProguardOutput createEmptyProguardAction(RuleContext ruleContext,
       Artifact proguardOutputJar, Artifact deployJarArtifact) throws InterruptedException {
-    ImmutableList.Builder<Artifact> failures =
-        ImmutableList.<Artifact>builder().add(proguardOutputJar);
+    ImmutableList.Builder<Artifact> failures = ImmutableList.<Artifact>builder()
+        .add(proguardOutputJar)
+        .add(ruleContext.getImplicitOutputArtifact(JavaSemantics.JAVA_BINARY_PROGUARD_CONFIG));
     if (ruleContext.attributes().get("proguard_generate_mapping", Type.BOOLEAN)) {
       failures.add(ruleContext.getImplicitOutputArtifact(JavaSemantics.JAVA_BINARY_PROGUARD_MAP));
     }
@@ -793,6 +954,76 @@ public abstract class AndroidBinary implements RuleConfiguredTargetFactory {
                     ? "without proguard_specs"
                     : "in optimization mode " + optMode)));
     return new ProguardOutput(deployJarArtifact, null);
+  }
+
+  private static Artifact shrinkResources(
+      RuleContext ruleContext,
+      AndroidCommon androidCommon,
+      ResourceApk resourceApk,
+      Artifact deployJar,
+      ImmutableList<Artifact> proguardSpecs) throws InterruptedException {
+
+    if (ruleContext.getFragment(AndroidConfiguration.class).useAndroidResourceShrinking()
+        && LocalResourceContainer.definesAndroidResources(ruleContext.attributes())
+        && !proguardSpecs.isEmpty()) {
+
+      // TODO(apell): Once ProGuard is split into multiple runs, use the Artifact from the shrinking
+      // pass here instead.
+      Artifact shrunkJar = ruleContext.getImplicitOutputArtifact(
+          AndroidRuleClasses.ANDROID_BINARY_SHRUNK_JAR);
+      AndroidSdkProvider sdk = AndroidSdkProvider.fromRuleContext(ruleContext);
+
+      Iterable<Artifact> libraryJars = NestedSetBuilder.<Artifact>naiveLinkOrder()
+          .add(sdk.getAndroidJar())
+          .addTransitive(androidCommon.getTransitiveNeverLinkLibraries())
+          .build();
+      Builder builder = new SpawnAction.Builder()
+          .addInput(deployJar)
+          .addInputs(libraryJars)
+          .addInputs(proguardSpecs)
+          .setExecutable(sdk.getProguard())
+          .setProgressMessage("Finding Resource References With Proguard")
+          .setMnemonic("ProguardResourceMapping")
+          .addArgument("-injars")
+          .addArgument(deployJar.getExecPathString());
+
+      for (Artifact libraryJar : libraryJars) {
+        builder.addArgument("-libraryjars")
+            .addArgument(libraryJar.getExecPathString());
+      }
+
+      for (Artifact proguardSpec : proguardSpecs) {
+        builder.addArgument("@" + proguardSpec.getExecPathString());
+      }
+
+      builder.addArgument("-ignorewarnings")
+          .addArgument("-dontnote")
+          .addArgument("-forceprocessing")
+          .addArgument("-dontoptimize")
+          .addArgument("-dontobfuscate")
+          .addArgument("-dontpreverify")
+          .addArgument("-outjars")
+          .addOutputArgument(shrunkJar);
+
+      ruleContext.registerAction(builder.build(ruleContext));
+
+      return new ResourceShrinkerActionBuilder(ruleContext)
+          .setResourceApkOut(ruleContext.getImplicitOutputArtifact(
+              AndroidRuleClasses.ANDROID_RESOURCES_SHRUNK_APK))
+          .setShrunkResourcesOut(ruleContext.getImplicitOutputArtifact(
+              AndroidRuleClasses.ANDROID_RESOURCES_SHRUNK_ZIP))
+          .withResourceFiles(ruleContext.getImplicitOutputArtifact(
+              AndroidRuleClasses.ANDROID_RESOURCES_ZIP))
+          .withShrunkJar(shrunkJar)
+          .withPrimary(resourceApk.getPrimaryResource())
+          .withDependencies(resourceApk.getResourceDependencies())
+          .setConfigurationFilters(
+              ruleContext.getTokenizedStringListAttr("resource_configuration_filters"))
+          .setUncompressedExtensions(
+              ruleContext.getTokenizedStringListAttr("nocompress_extensions"))
+          .build();
+    }
+    return resourceApk.getArtifact();
   }
 
   @Immutable
@@ -826,22 +1057,36 @@ public abstract class AndroidBinary implements RuleConfiguredTargetFactory {
     return new DexingOutput(classesDexZip, null, ImmutableList.of(classesDexZip));
   }
 
-  /** Dexes the ProguardedJar to generate ClassesDex that has a reference classes.dex. */
-  private static DexingOutput dex(RuleContext ruleContext, MultidexMode multidexMode,
-      List<String> dexopts, Artifact deployJar,  Artifact proguardedJar, AndroidCommon common,
-      JavaTargetAttributes attributes) throws InterruptedException {
-    String classesDexFileName = getMultidexMode(ruleContext).getOutputDexFilename();
-    Artifact classesDex = AndroidBinary.getDxArtifact(ruleContext, classesDexFileName);
-    if (!AndroidBinary.supportsMultidexMode(ruleContext, multidexMode)) {
+  /** Creates one or more classes.dex files that correspond to {@code proguardedJar}. */
+  private static DexingOutput dex(
+      RuleContext ruleContext,
+      Artifact binaryJar,
+      Artifact proguardedJar,
+      boolean isBinaryJarFiltered,
+      AndroidCommon common,
+      @Nullable Artifact mainDexProguardSpec,
+      JavaTargetAttributes attributes)
+      throws InterruptedException {
+    boolean finalJarIsDerived = isBinaryJarFiltered || binaryJar != proguardedJar;
+    List<String> dexopts = ruleContext.getTokenizedStringListAttr("dexopts");
+    MultidexMode multidexMode = getMultidexMode(ruleContext);
+    if (!supportsMultidexMode(ruleContext, multidexMode)) {
       ruleContext.ruleError("Multidex mode \"" + multidexMode.getAttributeValue()
           + "\" not supported by this version of the Android SDK");
       return null;
     }
 
     int dexShards = ruleContext.attributes().get("dex_shards", Type.INTEGER);
-    if (dexShards > 1 && multidexMode == MultidexMode.OFF) {
-      ruleContext.ruleError(".dex sharding is only available in multidex mode");
-      return null;
+    if (dexShards > 1) {
+      if (multidexMode == MultidexMode.OFF) {
+        ruleContext.ruleError(".dex sharding is only available in multidex mode");
+        return null;
+      }
+
+      if (multidexMode == MultidexMode.MANUAL_MAIN_DEX) {
+        ruleContext.ruleError(".dex sharding is not available in manual multidex mode");
+        return null;
+      }
     }
 
     Artifact mainDexList = ruleContext.getPrerequisiteArtifact("main_dex_list", Mode.TARGET);
@@ -852,80 +1097,70 @@ public abstract class AndroidBinary implements RuleConfiguredTargetFactory {
       return null;
     }
 
+    // Always OFF if finalJarIsDerived
+    ImmutableSet<AndroidBinaryType> incrementalDexing =
+        getEffectiveIncrementalDexing(ruleContext, dexopts, finalJarIsDerived);
     if (multidexMode == MultidexMode.OFF) {
       // Single dex mode: generate classes.dex directly from the input jar.
-      AndroidCommon.createDexAction(
-          ruleContext, proguardedJar, classesDex, dexopts, false, null);
-      return new DexingOutput(classesDex, deployJar, ImmutableList.of(classesDex));
+      if (incrementalDexing.contains(AndroidBinaryType.MONODEX)) {
+        Artifact classesDex = getDxArtifact(ruleContext, "classes.dex.zip");
+        Artifact jarToDex = getDxArtifact(ruleContext, "classes.jar");
+        createShuffleJarAction(ruleContext, true, (Artifact) null, ImmutableList.of(jarToDex),
+            common, attributes, (Artifact) null);
+        createDexMergerAction(ruleContext, "off", jarToDex, classesDex, (Artifact) null,
+            /* minimalMainDex */ false);
+        return new DexingOutput(classesDex, binaryJar, ImmutableList.of(classesDex));
+      } else {
+        // By *not* writing a zip we get dx to drop resources on the floor.
+        Artifact classesDex = getDxArtifact(ruleContext, "classes.dex");
+        AndroidCommon.createDexAction(
+            ruleContext, proguardedJar, classesDex, dexopts, /* multidex */ false, (Artifact) null);
+        return new DexingOutput(classesDex, binaryJar, ImmutableList.of(classesDex));
+      }
     } else {
       // Multidex mode: generate classes.dex.zip, where the zip contains [classes.dex,
-      // classes2.dex, ... classesN.dex]. Because the dexer also places resources into this zip,
-      // we also need to create a cleanup action that removes all non-.dex files before staging
-      // for apk building.
+      // classes2.dex, ... classesN.dex].
+
       if (multidexMode == MultidexMode.LEGACY) {
         // For legacy multidex, we need to generate a list for the dexer's --main-dex-list flag.
-        mainDexList = createMainDexListAction(ruleContext, proguardedJar);
+        mainDexList = createMainDexListAction(ruleContext, proguardedJar, mainDexProguardSpec);
       }
 
+      Artifact classesDex = getDxArtifact(ruleContext, "classes.dex.zip");
       if (dexShards > 1) {
-        List<Artifact> shardJars = new ArrayList<>(dexShards);
+        List<Artifact> shards = new ArrayList<>(dexShards);
         for (int i = 1; i <= dexShards; i++) {
-          shardJars.add(getDxArtifact(ruleContext, "shard" + i + ".jar"));
+          shards.add(getDxArtifact(ruleContext, "shard" + i + ".jar"));
         }
-
-        CustomCommandLine.Builder shardCommandLine = CustomCommandLine.builder()
-            .addBeforeEachExecPath("--output_jar", shardJars);
 
         Artifact javaResourceJar =
-            ruleContext.getImplicitOutputArtifact(AndroidRuleClasses.JAVA_RESOURCES_JAR);
-
-        if (mainDexList != null) {
-          shardCommandLine.addExecPath("--main_dex_filter", mainDexList);
-        }
-
-        // If we need to run Proguard, all the class files will be in the Proguarded jar and the
-        // deploy jar will already have been built (since it's the input of Proguard) and it will
-        // contain all the Java resources. Otherwise, we don't want to have deploy jar creation on
-        // the critical path, so we put all the jar files that constitute it on the inputs of the
-        // jar shuffler.
-        if (proguardedJar != deployJar) {
-          shardCommandLine.addExecPath("--input_jar", proguardedJar);
-        } else {
-          shardCommandLine
-              .addBeforeEachExecPath("--input_jar", common.getRuntimeJars())
-              .addBeforeEachExecPath("--input_jar", attributes.getRuntimeClassPathForArchive());
-        }
-
-        shardCommandLine.addExecPath("--output_resources", javaResourceJar);
-
-        SpawnAction.Builder shardAction = new SpawnAction.Builder()
-            .setMnemonic("ShardClassesToDex")
-            .setProgressMessage("Sharding classes for dexing for " + ruleContext.getLabel())
-            .setExecutable(ruleContext.getExecutablePrerequisite("$shuffle_jars", Mode.HOST))
-            .addOutputs(shardJars)
-            .addOutput(javaResourceJar)
-            .setCommandLine(shardCommandLine.build());
-
-        if (mainDexList != null) {
-          shardAction.addInput(mainDexList);
-        }
-        if (proguardedJar != deployJar) {
-          shardAction.addInput(proguardedJar);
-        } else {
-          shardAction
-              .addInputs(common.getRuntimeJars())
-              .addInputs(attributes.getRuntimeClassPathForArchive());
-        }
-
-        ruleContext.registerAction(shardAction.build(ruleContext));
+            createShuffleJarAction(
+                ruleContext,
+                incrementalDexing.contains(AndroidBinaryType.MULTIDEX_SHARDED),
+                finalJarIsDerived ? proguardedJar : null,
+                shards,
+                common,
+                attributes,
+                mainDexList);
 
         List<Artifact> shardDexes = new ArrayList<>(dexShards);
         for (int i = 1; i <= dexShards; i++) {
-          Artifact shardJar = shardJars.get(i - 1);
-          Artifact shard = getDxArtifact(ruleContext, "shard" + i + ".dex.zip");
-          shardDexes.add(shard);
-          AndroidCommon.createDexAction(
-              ruleContext, shardJar, shard, dexopts, true, null);
+          Artifact shard = shards.get(i - 1);
+          Artifact shardDex = getDxArtifact(ruleContext, "shard" + i + ".dex.zip");
+          shardDexes.add(shardDex);
+          if (incrementalDexing.contains(AndroidBinaryType.MULTIDEX_SHARDED)) {
+            // If there's a main dex list then the first shard contains exactly those files.
+            // To work with devices that lack native multi-dex support we need to make sure that
+            // the main dex list becomes one dex file if at all possible.
+            // Note shard here (mostly) contains of .class.dex files from shuffled dex archives,
+            // instead of being a conventional Jar file with .class files.
+            String multidexStrategy = mainDexList != null && i == 1 ? "minimal" : "best_effort";
+            createDexMergerAction(ruleContext, multidexStrategy, shard, shardDex, (Artifact) null,
+                /* minimalMainDex */ false);
+          } else {
+            AndroidCommon.createDexAction(
+                ruleContext, shard, shardDex, dexopts, /* multidex */ true, (Artifact) null);
+          }
         }
 
         CommandLine mergeCommandLine = CustomCommandLine.builder()
@@ -940,21 +1175,170 @@ public abstract class AndroidBinary implements RuleConfiguredTargetFactory {
             .addOutput(classesDex)
             .setCommandLine(mergeCommandLine)
             .build(ruleContext));
+        if (incrementalDexing.contains(AndroidBinaryType.MULTIDEX_SHARDED)) {
+          // Using the deploy jar for java resources gives better "bazel mobile-install" performance
+          // with incremental dexing b/c bazel can create the "incremental" and "split resource"
+          // APKs earlier (b/c these APKs don't depend on code being dexed here).  This is also done
+          // for other multidex modes.
+          javaResourceJar = binaryJar;
+        }
         return new DexingOutput(classesDex, javaResourceJar, shardDexes);
       } else {
-        // Create an artifact for the intermediate zip output that includes non-.dex files.
-        Artifact classesDexIntermediate = AndroidBinary.getDxArtifact(
-            ruleContext,
-            "intermediate_" + classesDexFileName);
-
-        // Have the dexer generate the intermediate file and the "cleaner" action consume this to
-        // generate the final archive with only .dex files.
-        AndroidCommon.createDexAction(ruleContext, proguardedJar,
-            classesDexIntermediate, dexopts, true, mainDexList);
-        createCleanDexZipAction(ruleContext, classesDexIntermediate, classesDex);
-        return new DexingOutput(classesDex, deployJar, ImmutableList.of(classesDex));
+        if (incrementalDexing.contains(AndroidBinaryType.MULTIDEX_UNSHARDED)) {
+          Artifact jarToDex = AndroidBinary.getDxArtifact(ruleContext, "classes.jar");
+          createShuffleJarAction(ruleContext, true, (Artifact) null, ImmutableList.of(jarToDex),
+              common, attributes, (Artifact) null);
+          createDexMergerAction(ruleContext, "minimal", jarToDex, classesDex, mainDexList,
+              // unlike dexopts.contains(), this works even for "--a --b" in one string
+              Iterables.any(dexopts, FlagMatcher.MINIMAL_MAIN_DEX));
+        } else {
+          // Because the dexer also places resources into this zip, we also need to create a cleanup
+          // action that removes all non-.dex files before staging for apk building.
+          // Create an artifact for the intermediate zip output that includes non-.dex files.
+          Artifact classesDexIntermediate = AndroidBinary.getDxArtifact(
+              ruleContext, "intermediate_classes.dex.zip");
+          // Have the dexer generate the intermediate file and the "cleaner" action consume this to
+          // generate the final archive with only .dex files.
+          AndroidCommon.createDexAction(ruleContext, proguardedJar,
+              classesDexIntermediate, dexopts, /* multidex */ true, mainDexList);
+          createCleanDexZipAction(ruleContext, classesDexIntermediate, classesDex);
+        }
+        return new DexingOutput(classesDex, binaryJar, ImmutableList.of(classesDex));
       }
     }
+  }
+
+  private static ImmutableSet<AndroidBinaryType> getEffectiveIncrementalDexing(
+      RuleContext ruleContext, List<String> dexopts, boolean finalJarIsDerived) {
+    if (finalJarIsDerived) {
+      return ImmutableSet.of();
+    }
+    ImmutableSet<AndroidBinaryType> result =
+        AndroidCommon.getAndroidConfig(ruleContext).getIncrementalDexingBinaries();
+    if (!result.isEmpty()
+        && Iterables.any(dexopts,
+            new FlagMatcher(AndroidCommon
+                .getAndroidConfig(ruleContext)
+                .getTargetDexoptsThatPreventIncrementalDexing()))) {
+      result = ImmutableSet.of();
+    }
+    return result;
+  }
+
+  private static void createDexMergerAction(
+      RuleContext ruleContext,
+      String multidexStrategy,
+      Artifact inputJar,
+      Artifact classesDex,
+      @Nullable Artifact mainDexList,
+      boolean minimalMainDex) {
+    checkArgument(!minimalMainDex || mainDexList != null, "expected mainDexList");
+    SpawnAction.Builder dexmerger = new SpawnAction.Builder()
+        .setExecutable(ruleContext.getExecutablePrerequisite("$dexmerger", Mode.HOST))
+        .addArgument("--input")
+        .addInputArgument(inputJar)
+        .addArgument("--output")
+        .addOutputArgument(classesDex)
+        .addArgument("--multidex=" + multidexStrategy)
+        .setMnemonic("DexMerger")
+        .setProgressMessage("Assembling dex files into " + classesDex.prettyPrint());
+    if (ruleContext.getConfiguration().isCodeCoverageEnabled()) {
+      // Match what we do in AndroidCommon.createDexAction
+      dexmerger.addArgument("--nolocals"); // TODO(bazel-team): Still needed? See createDexAction
+    }
+    if (mainDexList != null) {
+      dexmerger.addArgument("--main-dex-list").addInputArgument(mainDexList);
+      if (minimalMainDex) {
+        dexmerger.addArgument("--minimal-main-dex");
+      }
+    }
+    ruleContext.registerAction(dexmerger.build(ruleContext));
+  }
+
+  /**
+   * Returns a {@link DexArchiveProvider} of all transitively generated dex archives as well as
+   * dex archives for the Jars produced by the binary target itself.
+   */
+  private static DexArchiveProvider collectDexArchives(
+      RuleContext ruleContext, AndroidCommon common) {
+    DexArchiveProvider.Builder result = new DexArchiveProvider.Builder()
+        // Use providers from all attributes that declare DexArchiveAspect
+        .addTransitiveProviders(
+            ruleContext.getPrerequisites("deps", Mode.TARGET, DexArchiveProvider.class));
+    for (Artifact jar : common.getJarsProducedForRuntime()) {
+      // Create dex archives next to all Jars produced by AndroidCommon for this rule.  We need to
+      // do this (instead of placing dex archives into the _dx subdirectory like DexArchiveAspect
+      // does because for "legacy" ResourceApks, AndroidCommon produces Jars per resource dependency
+      // that can theoretically have duplicate basenames, so they go into special directories, and
+      // we piggyback on that naming scheme here by placing dex archives into the same directories.
+      PathFragment jarPath = jar.getRootRelativePath();
+      Artifact dexArchive = ruleContext.getDerivedArtifact(
+          jarPath.replaceName(jarPath.getBaseName() + ".dex.zip"),
+          jar.getRoot());
+      DexArchiveAspect.createDexArchiveAction(ruleContext, jar, dexArchive);
+      result.addDexArchive(dexArchive, jar);
+    }
+    return result.build();
+  }
+
+  private static Artifact createShuffleJarAction(
+      RuleContext ruleContext,
+      boolean useDexArchives,
+      @Nullable Artifact proguardedJar,
+      List<Artifact> shards,
+      AndroidCommon common,
+      JavaTargetAttributes attributes,
+      @Nullable Artifact mainDexList)
+      throws InterruptedException {
+    checkArgument(mainDexList == null || shards.size() > 1);
+    Artifact javaResourceJar =
+        ruleContext.getImplicitOutputArtifact(AndroidRuleClasses.JAVA_RESOURCES_JAR);
+
+    SpawnAction.Builder shardAction = new SpawnAction.Builder()
+        .setMnemonic("ShardClassesToDex")
+        .setProgressMessage("Sharding classes for dexing for " + ruleContext.getLabel())
+        .setExecutable(ruleContext.getExecutablePrerequisite("$shuffle_jars", Mode.HOST))
+        .addOutputs(shards)
+        .addOutput(javaResourceJar);
+
+    CustomCommandLine.Builder shardCommandLine = CustomCommandLine.builder()
+        .addBeforeEachExecPath("--output_jar", shards)
+        .addExecPath("--output_resources", javaResourceJar);
+
+    if (mainDexList != null) {
+      shardCommandLine.addExecPath("--main_dex_filter", mainDexList);
+      shardAction.addInput(mainDexList);
+    }
+
+    // If we need to run Proguard, all the class files will be in the Proguarded jar and the
+    // deploy jar will already have been built (since it's the input of Proguard) and it will
+    // contain all the Java resources. Otherwise, we don't want to have deploy jar creation on
+    // the critical path, so we put all the jar files that constitute it on the inputs of the
+    // jar shuffler.
+    if (proguardedJar != null) {
+      // When proguard is used we can't use dex archives, so just shuffle the proguarded jar
+      checkArgument(!useDexArchives, "Dex archives are incompatible with Proguard");
+      shardCommandLine.addExecPath("--input_jar", proguardedJar);
+      shardAction.addInput(proguardedJar);
+    } else {
+      Iterable<Artifact> classpath =
+          Iterables.concat(common.getRuntimeJars(), attributes.getRuntimeClassPathForArchive());
+      // Check whether we can use dex archives.  Besides the --incremental_dexing flag, also
+      // make sure the "dexopts" attribute on this target doesn't mention any problematic flags.
+      if (useDexArchives) {
+        // Use dex archives instead of their corresponding Jars wherever we can.  At this point
+        // there should be very few or no Jar files that still end up in shards.  The dexing
+        // step below will have to deal with those in addition to merging .dex files together.
+        classpath = Iterables.transform(classpath, collectDexArchives(ruleContext, common));
+        shardCommandLine.add("--split_dexed_classes");
+      }
+      shardCommandLine.addBeforeEachExecPath("--input_jar", classpath);
+      shardAction.addInputs(classpath);
+    }
+
+    shardAction.setCommandLine(shardCommandLine.build());
+    ruleContext.registerAction(shardAction.build(ruleContext));
+    return javaResourceJar;
   }
 
   /**
@@ -982,7 +1366,8 @@ public abstract class AndroidBinary implements RuleConfiguredTargetFactory {
    * --main-dex-list flag (which specifies the classes that need to be directly in classes.dex).
    * Returns the file containing the list.
    */
-  static Artifact createMainDexListAction(RuleContext ruleContext, Artifact jar) {
+  static Artifact createMainDexListAction(
+      RuleContext ruleContext, Artifact jar, @Nullable Artifact mainDexProguardSpec) {
     // Process the input jar through Proguard into an intermediate, streamlined jar.
     Artifact strippedJar = AndroidBinary.getDxArtifact(ruleContext, "main_dex_intermediate.jar");
     AndroidSdkProvider sdk = AndroidSdkProvider.fromRuleContext(ruleContext);
@@ -991,6 +1376,7 @@ public abstract class AndroidBinary implements RuleConfiguredTargetFactory {
         .setExecutable(sdk.getProguard())
         .setProgressMessage("Generating streamlined input jar for main dex classes list")
         .setMnemonic("MainDexClassesIntermediate")
+        .addArgument("-forceprocessing")
         .addArgument("-injars")
         .addInputArgument(jar)
         .addArgument("-libraryjars")
@@ -999,15 +1385,18 @@ public abstract class AndroidBinary implements RuleConfiguredTargetFactory {
         .addArgument(strippedJar.getExecPathString())
         .addArgument("-dontwarn")
         .addArgument("-dontnote")
-        .addArgument("-forceprocessing")
         .addArgument("-dontoptimize")
         .addArgument("-dontobfuscate")
         .addArgument("-dontpreverify");
 
-    List<Artifact> specs = ruleContext.getPrerequisiteArtifacts(
-        "main_dex_proguard_specs", Mode.TARGET).list();
+    List<Artifact> specs = new ArrayList<>();
+    specs.addAll(
+        ruleContext.getPrerequisiteArtifacts("main_dex_proguard_specs", Mode.TARGET).list());
     if (specs.isEmpty()) {
-      specs = ImmutableList.of(sdk.getMainDexClasses());
+      specs.add(sdk.getMainDexClasses());
+    }
+    if (mainDexProguardSpec != null) {
+      specs.add(mainDexProguardSpec);
     }
 
     for (Artifact spec : specs) {
@@ -1053,6 +1442,13 @@ public abstract class AndroidBinary implements RuleConfiguredTargetFactory {
         .build(ruleContext));
 
     return splitResources;
+  }
+
+  @Nullable
+  private static Artifact createMainDexProguardSpec(RuleContext ruleContext) {
+    return AndroidSdkProvider.fromRuleContext(ruleContext).getAaptSupportsMainDexGeneration()
+        ? ProguardHelper.getProguardConfigArtifact(ruleContext, "main_dex")
+        : null;
   }
 
   /**
@@ -1314,5 +1710,26 @@ public abstract class AndroidBinary implements RuleConfiguredTargetFactory {
   public static Artifact getDxArtifact(RuleContext ruleContext, String baseName) {
     return ruleContext.getUniqueDirectoryArtifact("_dx", baseName,
         ruleContext.getBinOrGenfilesDirectory());
+  }
+
+  private static class FlagMatcher implements Predicate<String> {
+    static final FlagMatcher MINIMAL_MAIN_DEX =
+        new FlagMatcher(ImmutableList.of("--minimal-main-dex"));
+
+    private final ImmutableList<String> matching;
+
+    FlagMatcher(ImmutableList<String> matching) {
+      this.matching = matching;
+    }
+
+    @Override
+    public boolean apply(String input) {
+      for (String match : matching) {
+        if (input.contains(match)) {
+          return true;
+        }
+      }
+      return false;
+    }
   }
 }

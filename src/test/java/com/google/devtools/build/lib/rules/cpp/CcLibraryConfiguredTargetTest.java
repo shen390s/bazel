@@ -37,6 +37,7 @@ import com.google.devtools.build.lib.analysis.OutputGroupProvider;
 import com.google.devtools.build.lib.analysis.util.AnalysisMock;
 import com.google.devtools.build.lib.analysis.util.BuildViewTestCase;
 import com.google.devtools.build.lib.packages.util.MockCcSupport;
+import com.google.devtools.build.lib.rules.test.InstrumentedFilesProvider;
 import com.google.devtools.build.lib.testutil.TestConstants;
 import com.google.devtools.build.lib.util.FileType;
 import com.google.devtools.build.lib.vfs.PathFragment;
@@ -291,6 +292,24 @@ public class CcLibraryConfiguredTargetTest extends BuildViewTestCase {
   }
 
   @Test
+  public void testCodeCoverage() throws Exception {
+    AnalysisMock.get()
+        .ccSupport()
+        .setupCrosstool(mockToolsConfig, MockCcSupport.HEADER_MODULES_FEATURE_CONFIGURATION);
+    useConfiguration("--collect_code_coverage");
+    ConfiguredTarget x =
+        scratchConfiguredTarget(
+            "foo",
+            "x",
+            "package(features = ['header_modules'])",
+            "cc_library(name = 'x', srcs = ['x.cc'])");
+    assertThat(
+            ActionsTestUtil.baseArtifactNames(
+                x.getProvider(InstrumentedFilesProvider.class).getInstrumentationMetadataFiles()))
+        .containsExactly("x.pic.gcno");
+  }
+
+  @Test
   public void testDisablingHeaderModulesWhenDependingOnModuleBuildTransitively() throws Exception {
     AnalysisMock.get()
         .ccSupport()
@@ -361,7 +380,10 @@ public class CcLibraryConfiguredTargetTest extends BuildViewTestCase {
         .ccSupport()
         .setupCrosstool(
             mockToolsConfig,
-            "" + "feature { name: 'header_modules' }" + "feature { name: 'module_maps' }");
+            ""
+                + "feature { name: 'header_modules' implies: 'use_header_modules' }"
+                + "feature { name: 'module_maps' }"
+                + "feature { name: 'use_header_modules' }");
     useConfiguration();
     scratch.file("module/BUILD",
         "package(features = ['header_modules'])",
@@ -387,9 +409,7 @@ public class CcLibraryConfiguredTargetTest extends BuildViewTestCase {
     Artifact aObjectArtifact = getBinArtifact("_objs/a/module/a.pic.o", "//module:a");
     CppCompileAction aObjectAction = (CppCompileAction) getGeneratingAction(aObjectArtifact);
     assertThat(aObjectAction.getIncludeScannerSources()).containsExactly(
-        getSourceArtifact("module/a.cc"),
-        getSourceArtifact("module/b.h"),
-        getSourceArtifact("module/t.h"));
+        getSourceArtifact("module/a.cc"));
     assertThat(aObjectAction.getInputs()).contains(
         getBinArtifact("_objs/b/module/b.pic.pcm", "//module:b"));
     assertThat(aObjectAction.getInputs()).contains(
@@ -471,7 +491,7 @@ public class CcLibraryConfiguredTargetTest extends BuildViewTestCase {
         .setupCrosstool(mockToolsConfig, MockCcSupport.HEADER_MODULES_FEATURE_CONFIGURATION);
     useConfiguration();
     setupPackagesForModuleTests(/*useHeaderModules=*/false);
-    
+
     // The //nomodule:f target only depends on non-module targets, thus it should be module-free.
     getConfiguredTarget("//nomodule:f");
     assertThat(getGeneratingAction(getBinArtifact("_objs/f/nomodule/f.pic.pcm", "//nomodule:f")))
@@ -497,17 +517,15 @@ public class CcLibraryConfiguredTargetTest extends BuildViewTestCase {
     assertThat(getNonSystemModuleMaps(cObjectAction.getInputs())).containsExactly(
         getGenfilesArtifact("b.cppmap", "//module:b"),
         getGenfilesArtifact("c.cppmap", "//nomodule:e"));
-    assertThat(getHeaderModules(cObjectAction.getInputs())).containsExactly(
-        getBinArtifact("_objs/b/module/b.pic.pcm", "//module:b"));
+    assertThat(getHeaderModules(cObjectAction.getInputs())).isEmpty();
     // All headers of transitive dependencies that are built as modules are needed as entry points
     // for include scanning.
     assertThat(cObjectAction.getIncludeScannerSources()).containsExactly(
-        getSourceArtifact("nomodule/c.cc"),
-        getSourceArtifact("module/b.h"));
+        getSourceArtifact("nomodule/c.cc"));
     assertThat(cObjectAction.getMainIncludeScannerSource()).isEqualTo(
         getSourceArtifact("nomodule/c.cc"));
     assertThat(getHeaderModuleFlags(cObjectAction.getCompilerOptions())).isEmpty();
-     
+
     // The //nomodule:d target depends on //module:b via one indirection (//nomodule:c).
     getConfiguredTarget("//nomodule:d");
     assertThat(getGeneratingAction(getBinArtifact("_objs/d/nomodule/d.pic.pcm", "//nomodule:d")))
@@ -518,12 +536,8 @@ public class CcLibraryConfiguredTargetTest extends BuildViewTestCase {
     assertThat(getNonSystemModuleMaps(dObjectAction.getInputs())).containsExactly(
         getGenfilesArtifact("c.cppmap", "//nomodule:c"),
         getGenfilesArtifact("d.cppmap", "//nomodule:d"));
-    assertThat(getHeaderModules(dObjectAction.getInputs())).containsExactly(
-        getBinArtifact("_objs/b/module/b.pic.pcm", "//module:b"));
-    // All headers of transitive dependencies that are built as modules are needed as entry points
-    // for include scanning.
+    assertThat(getHeaderModules(dObjectAction.getInputs())).isEmpty();
     assertThat(dObjectAction.getIncludeScannerSources()).containsExactly(
-        getSourceArtifact("module/b.h"),
         getSourceArtifact("nomodule/d.cc"));
     assertThat(getHeaderModuleFlags(dObjectAction.getCompilerOptions())).isEmpty();
 
@@ -536,9 +550,7 @@ public class CcLibraryConfiguredTargetTest extends BuildViewTestCase {
         getBinArtifact("_objs/b/module/b.pic.pcm", "//module:b"),
         getBinArtifact("_objs/g/module/g.pic.pcm", "//module:g"));
     assertThat(jObjectAction.getIncludeScannerSources()).containsExactly(
-        getSourceArtifact("module/j.cc"),
-        getSourceArtifact("module/b.h"),
-        getSourceArtifact("module/g.h"));
+        getSourceArtifact("module/j.cc"));
     assertThat(jObjectAction.getMainIncludeScannerSource()).isEqualTo(
         getSourceArtifact("module/j.cc"));
     assertThat(getHeaderModuleFlags(jObjectAction.getCompilerOptions()))
@@ -576,6 +588,8 @@ public class CcLibraryConfiguredTargetTest extends BuildViewTestCase {
         getGenfilesArtifact("a.cppmap", "//nomodule:a"),
         getGenfilesArtifact("b.cppmap", "//module:b"),
         getGenfilesArtifact("c.cppmap", "//nomodule:e"));
+    assertThat(getHeaderModules(cObjectAction.getInputs()))
+        .containsExactly(getBinArtifact("_objs/b/module/b.pic.pcm", "//module:b"));
     assertThat(getHeaderModuleFlags(cObjectAction.getCompilerOptions()))
         .containsExactly("b.pic.pcm");
      
@@ -589,6 +603,8 @@ public class CcLibraryConfiguredTargetTest extends BuildViewTestCase {
         getGenfilesArtifact("b.cppmap", "//module:b"),
         getGenfilesArtifact("c.cppmap", "//nomodule:c"),
         getGenfilesArtifact("d.cppmap", "//nomodule:d"));
+    assertThat(getHeaderModules(dObjectAction.getInputs()))
+        .containsExactly(getBinArtifact("_objs/b/module/b.pic.pcm", "//module:b"));
     assertThat(getHeaderModuleFlags(dObjectAction.getCompilerOptions()))
         .containsExactly("b.pic.pcm");
   }
@@ -731,6 +747,24 @@ public class CcLibraryConfiguredTargetTest extends BuildViewTestCase {
             "cc_library(name = 'y', hdrs = ['y.h'])");
     assertThat(ActionsTestUtil.baseNamesOf(getOutputGroup(x, OutputGroupProvider.HIDDEN_TOP_LEVEL)))
         .isEqualTo("y.h.processed");
+  }
+
+  @Test
+  public void testProcessHeadersInDependenciesOfBinaries() throws Exception {
+    AnalysisMock.get()
+        .ccSupport()
+        .setupCrosstool(mockToolsConfig, MockCcSupport.HEADER_PROCESSING_FEATURE_CONFIGURATION);
+    useConfiguration("--features=parse_headers", "--process_headers_in_dependencies");
+    ConfiguredTarget x =
+        scratchConfiguredTarget(
+            "foo",
+            "x",
+            "cc_binary(name = 'x', deps = [':y'])",
+            "cc_library(name = 'y', hdrs = ['y.h'])");
+    assertThat(
+            ActionsTestUtil.baseArtifactNames(
+                getOutputGroup(x, OutputGroupProvider.HIDDEN_TOP_LEVEL)))
+        .contains("y.h.processed");
   }
 
   @Test

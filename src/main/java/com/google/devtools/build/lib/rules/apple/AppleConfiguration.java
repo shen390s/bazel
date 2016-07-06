@@ -41,6 +41,11 @@ import javax.annotation.Nullable;
 @SkylarkModule(name = "apple", doc = "A configuration fragment for Apple platforms")
 @Immutable
 public class AppleConfiguration extends BuildConfiguration.Fragment {
+  /**
+   * Environment variable name for the xcode version. The value of this environment variable should
+   * be set to the version (for example, "7.2") of xcode to use when invoking part of the apple
+   * toolkit in action execution.
+   **/
   public static final String XCODE_VERSION_ENV_NAME = "XCODE_VERSION_OVERRIDE";
   /**
    * Environment variable name for the apple SDK version. If unset, uses the system default of the
@@ -56,6 +61,9 @@ public class AppleConfiguration extends BuildConfiguration.Fragment {
   private static final DottedVersion MINIMUM_BITCODE_XCODE_VERSION = DottedVersion.fromString("7");
 
   private final DottedVersion iosSdkVersion;
+  private final DottedVersion watchOsSdkVersion;
+  private final DottedVersion tvOsSdkVersion;
+  private final DottedVersion macOsXSdkVersion;
   private final String iosCpu;
   private final Optional<DottedVersion> xcodeVersion;
   private final ImmutableList<String> iosMultiCpus;
@@ -64,8 +72,19 @@ public class AppleConfiguration extends BuildConfiguration.Fragment {
   @Nullable private final Label defaultProvisioningProfileLabel;
 
   AppleConfiguration(AppleCommandLineOptions appleOptions,
-      Optional<DottedVersion> xcodeVersionOverride) {
-    this.iosSdkVersion = Preconditions.checkNotNull(appleOptions.iosSdkVersion, "iosSdkVersion");
+      Optional<DottedVersion> xcodeVersionOverride,
+      DottedVersion iosSdkVersion,
+      DottedVersion watchOsSdkVersion,
+      DottedVersion tvOsSdkVersion,
+      DottedVersion macOsXSdkVersion) {
+    this.iosSdkVersion = Preconditions.checkNotNull(iosSdkVersion, "iosSdkVersion");
+    this.watchOsSdkVersion =
+        Preconditions.checkNotNull(watchOsSdkVersion, "watchOsSdkVersion");
+    this.tvOsSdkVersion =
+        Preconditions.checkNotNull(tvOsSdkVersion, "tvOsSdkVersion");
+    this.macOsXSdkVersion =
+        Preconditions.checkNotNull(macOsXSdkVersion, "macOsXSdkVersion");
+
     this.xcodeVersion = Preconditions.checkNotNull(xcodeVersionOverride);
     this.iosCpu = Preconditions.checkNotNull(appleOptions.iosCpu, "iosCpu");
     this.iosMultiCpus = ImmutableList.copyOf(
@@ -78,10 +97,35 @@ public class AppleConfiguration extends BuildConfiguration.Fragment {
 
   /**
    * Returns the SDK version for ios SDKs (whether they be for simulator or device). This is
-   * directly derived from --ios_sdk_version. Format "x.y" (for example, "6.4").
+   * directly derived from --ios_sdk_version.
+   *
+   * @deprecated - use {@link #getSdkVersionForPlatform()}
    */
-  public DottedVersion getIosSdkVersion() {
-    return iosSdkVersion;
+  @Deprecated public DottedVersion getIosSdkVersion() {
+    return getSdkVersionForPlatform(Platform.IOS_DEVICE);
+  }
+
+  /**
+   * Returns the SDK version for a platform (whether they be for simulator or device). This is
+   * directly derived from command line args.
+   */
+  @SkylarkCallable(name = "sdk_version_for_platform", doc = "The SDK version given a platform.")
+  public DottedVersion getSdkVersionForPlatform(Platform platform) {
+    switch (platform) {
+      case IOS_DEVICE:
+      case IOS_SIMULATOR:
+        return iosSdkVersion;
+      case TVOS_DEVICE:
+      case TVOS_SIMULATOR:
+        return tvOsSdkVersion;
+      case WATCHOS_DEVICE:
+      case WATCHOS_SIMULATOR:
+        return watchOsSdkVersion;
+      case MACOS_X:
+        return macOsXSdkVersion;
+    }
+    throw new AssertionError();
+
   }
 
   /**
@@ -95,16 +139,16 @@ public class AppleConfiguration extends BuildConfiguration.Fragment {
 
   /**
    * Returns a map of environment variables (derived from configuration) that should be propagated
-   * for actions pertaining to building ios applications. Keys are variable names and values are
+   * for actions pertaining to the given apple platform. Keys are variable names and values are
    * their corresponding values.
    */
-  // TODO(bazel-team): Repurpose for non-ios platforms.
-  public Map<String, String> getEnvironmentForIosAction() {
+  @SkylarkCallable(name = "target_apple_env")
+  public Map<String, String> getTargetAppleEnvironment(Platform platform) {
     ImmutableMap.Builder<String, String> mapBuilder = ImmutableMap.builder();
-    mapBuilder.putAll(appleTargetPlatformEnv(Platform.forIosArch(getIosCpu())));
+    mapBuilder.putAll(appleTargetPlatformEnv(platform));
     return mapBuilder.build();
   }
-  
+
   /**
    * Returns a map of environment variables that should be propagated for actions that build on an
    * apple host system. These environment variables are needed by the apple toolchain. Keys are
@@ -119,11 +163,20 @@ public class AppleConfiguration extends BuildConfiguration.Fragment {
     )
   public Map<String, String> getAppleHostSystemEnv() {
     Optional<DottedVersion> xcodeVersion = getXcodeVersion();
-    ImmutableMap.Builder<String, String> builder = ImmutableMap.builder();
     if (xcodeVersion.isPresent()) {
-      builder.put(AppleConfiguration.XCODE_VERSION_ENV_NAME, xcodeVersion.get().toString());
+      return getXcodeVersionEnv(xcodeVersion.get());
+    } else {
+      return ImmutableMap.of();
     }
-    return builder.build();   
+  }
+
+  /**
+   * Returns a map of environment variables that should be propagated for actions that require
+   * a version of xcode to be explicitly declared. Keys are variable names and values are their
+   * corresponding values.
+   */
+  public Map<String, String> getXcodeVersionEnv(DottedVersion xcodeVersion) {
+    return ImmutableMap.of(AppleConfiguration.XCODE_VERSION_ENV_NAME, xcodeVersion.toString());
   }
 
   /**
@@ -137,14 +190,33 @@ public class AppleConfiguration extends BuildConfiguration.Fragment {
 
     // TODO(bazel-team): Handle non-ios platforms.
     if (platform == Platform.IOS_DEVICE || platform == Platform.IOS_SIMULATOR) {
-      builder.put(AppleConfiguration.APPLE_SDK_VERSION_ENV_NAME, getIosSdkVersion().toString())
+      String sdkVersion = getSdkVersionForPlatform(platform).toString();
+      builder.put(AppleConfiguration.APPLE_SDK_VERSION_ENV_NAME, sdkVersion)
           .put(AppleConfiguration.APPLE_SDK_PLATFORM_ENV_NAME, platform.getNameInPlist());
     }
     return builder.build();
   }
 
+  /**
+   * Returns the value of {@code ios_cpu} for this configuration. This is not necessarily the
+   * platform or cpu for all actions spawned in this configuration; it is appropriate for
+   * identifying the target cpu of iOS compile and link actions within this configuration.
+   */
+  @SkylarkCallable(name = "ios_cpu", doc = "The value of ios_cpu for this configuration.")
   public String getIosCpu() {
     return iosCpu;
+  }
+
+  /**
+   * Returns the {@link Platform} represented by {@code ios_cpu} (see {@link #getIosCpu}.
+   * (For example, {@code i386} maps to {@link Platform#IOS_SIMULATOR}.) Note that this is not
+   * necessarily the effective platform for all ios actions in the current context: This is
+   * typically the correct platform for implicityly-ios compile and link actions in the current
+   * context. For effective platform for bundling actions, see {@link #getBundlingPlatform}.
+   */
+  @SkylarkCallable(name = "ios_cpu_platform", doc = "The platform given by the ios_cpu flag.")
+  public Platform getIosCpuPlatform() {
+    return Platform.forIosArch(getIosCpu());
   }
   
   /**
@@ -226,8 +298,19 @@ public class AppleConfiguration extends BuildConfiguration.Fragment {
     public AppleConfiguration create(ConfigurationEnvironment env, BuildOptions buildOptions)
         throws InvalidConfigurationException {
       AppleCommandLineOptions appleOptions = buildOptions.get(AppleCommandLineOptions.class);
-      Optional<DottedVersion> xcodeVersionFlag = getXcodeVersion(env, appleOptions);
-      AppleConfiguration configuration = new AppleConfiguration(appleOptions, xcodeVersionFlag);
+      XcodeVersionProperties xcodeVersionProperties = getXcodeVersionProperties(env, appleOptions);
+
+      DottedVersion iosSdkVersion = (appleOptions.iosSdkVersion != null)
+          ? appleOptions.iosSdkVersion : xcodeVersionProperties.getDefaultIosSdkVersion();
+      DottedVersion watchosSdkVersion = (appleOptions.watchOsSdkVersion != null)
+          ? appleOptions.watchOsSdkVersion : xcodeVersionProperties.getDefaultWatchosSdkVersion();
+      DottedVersion tvosSdkVersion = (appleOptions.tvOsSdkVersion != null)
+          ? appleOptions.tvOsSdkVersion : xcodeVersionProperties.getDefaultTvosSdkVersion();
+      DottedVersion macosxSdkVersion = (appleOptions.macOsXSdkVersion != null)
+          ? appleOptions.macOsXSdkVersion : xcodeVersionProperties.getDefaultMacosxSdkVersion();
+      AppleConfiguration configuration =
+          new AppleConfiguration(appleOptions, xcodeVersionProperties.getXcodeVersion(),
+              iosSdkVersion, watchosSdkVersion, tvosSdkVersion, macosxSdkVersion);
 
       validate(configuration);
       return configuration;
@@ -258,15 +341,15 @@ public class AppleConfiguration extends BuildConfiguration.Fragment {
     /**
      * Uses the {@link AppleCommandLineOptions#xcodeVersion} and
      * {@link AppleCommandLineOptions#xcodeVersionConfig} command line options to determine and
-     * return the effective xcode version. Returns absent if no explicit xcode version is
-     * declared, and host system defaults should be used.
+     * return the effective xcode version properties. Returns absent if no explicit xcode version
+     * is declared, and host system defaults should be used.
      *
      * @param env the current configuration environment
      * @param appleOptions the command line options
      * @throws InvalidConfigurationException if the options given (or configuration targets) were
      *     malformed and thus the xcode version could not be determined
      */
-    private Optional<DottedVersion> getXcodeVersion(ConfigurationEnvironment env,
+    private XcodeVersionProperties getXcodeVersionProperties(ConfigurationEnvironment env,
         AppleCommandLineOptions appleOptions) throws InvalidConfigurationException {
       Optional<DottedVersion> xcodeVersionCommandLineFlag = 
           Optional.fromNullable(appleOptions.xcodeVersion);

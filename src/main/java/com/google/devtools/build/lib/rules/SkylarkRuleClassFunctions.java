@@ -33,7 +33,6 @@ import com.google.common.cache.LoadingCache;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
-import com.google.devtools.build.lib.Constants;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.analysis.BaseRuleClasses;
 import com.google.devtools.build.lib.analysis.OutputGroupProvider;
@@ -42,13 +41,11 @@ import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
 import com.google.devtools.build.lib.analysis.config.RunUnder;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.cmdline.LabelSyntaxException;
+import com.google.devtools.build.lib.cmdline.LabelValidator;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.collect.nestedset.Order;
-import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.events.Location;
-import com.google.devtools.build.lib.packages.AspectDefinition;
-import com.google.devtools.build.lib.packages.AspectParameters;
 import com.google.devtools.build.lib.packages.Attribute;
 import com.google.devtools.build.lib.packages.Attribute.ConfigurationTransition;
 import com.google.devtools.build.lib.packages.Attribute.LateBoundLabel;
@@ -59,6 +56,7 @@ import com.google.devtools.build.lib.packages.ImplicitOutputsFunction.SkylarkImp
 import com.google.devtools.build.lib.packages.Package.NameConflictException;
 import com.google.devtools.build.lib.packages.PackageFactory;
 import com.google.devtools.build.lib.packages.PackageFactory.PackageContext;
+import com.google.devtools.build.lib.packages.PredicateWithMessage;
 import com.google.devtools.build.lib.packages.Rule;
 import com.google.devtools.build.lib.packages.RuleClass;
 import com.google.devtools.build.lib.packages.RuleClass.Builder;
@@ -66,13 +64,12 @@ import com.google.devtools.build.lib.packages.RuleClass.Builder.RuleClassType;
 import com.google.devtools.build.lib.packages.RuleFactory;
 import com.google.devtools.build.lib.packages.RuleFactory.BuildLangTypedAttributeValuesMap;
 import com.google.devtools.build.lib.packages.RuleFactory.InvalidRuleException;
-import com.google.devtools.build.lib.packages.SkylarkAspectClass;
+import com.google.devtools.build.lib.packages.SkylarkAspect;
 import com.google.devtools.build.lib.packages.TargetUtils;
 import com.google.devtools.build.lib.packages.TestSize;
 import com.google.devtools.build.lib.rules.SkylarkAttr.Descriptor;
 import com.google.devtools.build.lib.skylarkinterface.SkylarkSignature;
 import com.google.devtools.build.lib.skylarkinterface.SkylarkSignature.Param;
-import com.google.devtools.build.lib.skylarkinterface.SkylarkValue;
 import com.google.devtools.build.lib.syntax.BaseFunction;
 import com.google.devtools.build.lib.syntax.BuiltinFunction;
 import com.google.devtools.build.lib.syntax.ClassObject;
@@ -83,9 +80,9 @@ import com.google.devtools.build.lib.syntax.EvalException;
 import com.google.devtools.build.lib.syntax.EvalUtils;
 import com.google.devtools.build.lib.syntax.FuncallExpression;
 import com.google.devtools.build.lib.syntax.FunctionSignature;
-import com.google.devtools.build.lib.syntax.Printer;
 import com.google.devtools.build.lib.syntax.Runtime;
 import com.google.devtools.build.lib.syntax.SkylarkCallbackFunction;
+import com.google.devtools.build.lib.syntax.SkylarkDict;
 import com.google.devtools.build.lib.syntax.SkylarkList;
 import com.google.devtools.build.lib.syntax.SkylarkNestedSet;
 import com.google.devtools.build.lib.syntax.SkylarkSignatureProcessor;
@@ -116,7 +113,7 @@ public class SkylarkRuleClassFunctions {
   private static final LateBoundLabel<BuildConfiguration> RUN_UNDER =
       new LateBoundLabel<BuildConfiguration>() {
         @Override
-        public Label getDefault(Rule rule, AttributeMap attributes,
+        public Label resolve(Rule rule, AttributeMap attributes,
             BuildConfiguration configuration) {
           RunUnder runUnder = configuration.getRunUnder();
           return runUnder == null ? null : runUnder.getLabel();
@@ -129,7 +126,7 @@ public class SkylarkRuleClassFunctions {
   private static final LateBoundLabelList<BuildConfiguration> GCOV =
       new LateBoundLabelList<BuildConfiguration>(ImmutableList.of(COVERAGE_SUPPORT_LABEL)) {
         @Override
-        public List<Label> getDefault(Rule rule, AttributeMap attributes,
+        public List<Label> resolve(Rule rule, AttributeMap attributes,
             BuildConfiguration configuration) {
           return configuration.isCodeCoverageEnabled()
               ? ImmutableList.copyOf(configuration.getGcovLabels())
@@ -140,7 +137,7 @@ public class SkylarkRuleClassFunctions {
   private static final LateBoundLabelList<BuildConfiguration> COVERAGE_REPORT_GENERATOR =
       new LateBoundLabelList<BuildConfiguration>(ImmutableList.of(COVERAGE_SUPPORT_LABEL)) {
         @Override
-        public List<Label> getDefault(Rule rule, AttributeMap attributes,
+        public List<Label> resolve(Rule rule, AttributeMap attributes,
             BuildConfiguration configuration) {
           return configuration.isCodeCoverageEnabled()
               ? ImmutableList.copyOf(configuration.getCoverageReportGeneratorLabels())
@@ -151,7 +148,7 @@ public class SkylarkRuleClassFunctions {
   private static final LateBoundLabelList<BuildConfiguration> COVERAGE_SUPPORT =
       new LateBoundLabelList<BuildConfiguration>(ImmutableList.of(COVERAGE_SUPPORT_LABEL)) {
         @Override
-        public List<Label> getDefault(Rule rule, AttributeMap attributes,
+        public List<Label> resolve(Rule rule, AttributeMap attributes,
             BuildConfiguration configuration) {
           return configuration.isCodeCoverageEnabled()
               ? ImmutableList.copyOf(configuration.getCoverageLabels())
@@ -163,12 +160,12 @@ public class SkylarkRuleClassFunctions {
   // rules to skylark extensions. Using the same instance would require a large refactoring.
   // If we don't want to support old built-in rules and Skylark simultaneously
   // (except for transition phase) it's probably OK.
-  private static LoadingCache<String, Label> labelCache =
+  private static final LoadingCache<String, Label> labelCache =
       CacheBuilder.newBuilder().build(new CacheLoader<String, Label>() {
     @Override
     public Label load(String from) throws Exception {
       try {
-        return Label.parseAbsolute(from);
+        return Label.parseAbsolute(from, false);
       } catch (LabelSyntaxException e) {
         throw new Exception(from);
       }
@@ -193,48 +190,49 @@ public class SkylarkRuleClassFunctions {
           .build();
 
   /** Parent rule class for test Skylark rules. */
-  public static final RuleClass testBaseRule =
-      new RuleClass.Builder("$test_base_rule", RuleClassType.ABSTRACT, true, baseRule)
-          .add(attr("size", STRING).value("medium").taggable()
-              .nonconfigurable("used in loading phase rule validation logic"))
-          .add(attr("timeout", STRING).taggable()
-              .nonconfigurable("used in loading phase rule validation logic").value(
-              new Attribute.ComputedDefault() {
-                @Override
-                public Object getDefault(AttributeMap rule) {
-                  TestSize size = TestSize.getTestSize(rule.get("size", Type.STRING));
-                  if (size != null) {
-                    String timeout = size.getDefaultTimeout().toString();
-                    if (timeout != null) {
-                      return timeout;
+  public static final RuleClass getTestBaseRule(String toolsRespository) {
+    return new RuleClass.Builder("$test_base_rule", RuleClassType.ABSTRACT, true, baseRule)
+        .add(attr("size", STRING).value("medium").taggable()
+            .nonconfigurable("used in loading phase rule validation logic"))
+        .add(attr("timeout", STRING).taggable()
+            .nonconfigurable("used in loading phase rule validation logic").value(
+                new Attribute.ComputedDefault() {
+                  @Override
+                  public Object getDefault(AttributeMap rule) {
+                    TestSize size = TestSize.getTestSize(rule.get("size", Type.STRING));
+                    if (size != null) {
+                      String timeout = size.getDefaultTimeout().toString();
+                      if (timeout != null) {
+                        return timeout;
+                      }
                     }
+                    return "illegal";
                   }
-                  return "illegal";
-                }
-              }))
-          .add(attr("flaky", BOOLEAN).value(false).taggable()
-              .nonconfigurable("taggable - called in Rule.getRuleTags"))
-          .add(attr("shard_count", INTEGER).value(-1))
-          .add(attr("local", BOOLEAN).value(false).taggable()
-              .nonconfigurable("policy decision: this should be consistent across configurations"))
-          .add(attr("args", STRING_LIST)
-              .nonconfigurable("policy decision: should be consistent across configurations"))
-          .add(attr("$test_runtime", LABEL_LIST).cfg(HOST).value(ImmutableList.of(
-              labelCache.getUnchecked(Constants.TOOLS_REPOSITORY + "//tools/test:runtime"))))
-          .add(attr(":run_under", LABEL).cfg(DATA).value(RUN_UNDER))
-          .add(attr(":gcov", LABEL_LIST).cfg(HOST).value(GCOV))
-          .add(attr(":coverage_support", LABEL_LIST).cfg(HOST).value(COVERAGE_SUPPORT))
-          .add(
-              attr(":coverage_report_generator", LABEL_LIST)
-                  .cfg(HOST)
-                  .value(COVERAGE_REPORT_GENERATOR))
-          .build();
+                }))
+        .add(attr("flaky", BOOLEAN).value(false).taggable()
+            .nonconfigurable("taggable - called in Rule.getRuleTags"))
+        .add(attr("shard_count", INTEGER).value(-1))
+        .add(attr("local", BOOLEAN).value(false).taggable()
+            .nonconfigurable("policy decision: this should be consistent across configurations"))
+        .add(attr("args", STRING_LIST)
+            .nonconfigurable("policy decision: should be consistent across configurations"))
+        .add(attr("$test_runtime", LABEL_LIST).cfg(HOST).value(ImmutableList.of(
+            labelCache.getUnchecked(toolsRespository + "//tools/test:runtime"))))
+        .add(attr(":run_under", LABEL).cfg(DATA).value(RUN_UNDER))
+        .add(attr(":gcov", LABEL_LIST).cfg(HOST).value(GCOV))
+        .add(attr(":coverage_support", LABEL_LIST).cfg(HOST).value(COVERAGE_SUPPORT))
+        .add(
+            attr(":coverage_report_generator", LABEL_LIST)
+            .cfg(HOST)
+            .value(COVERAGE_REPORT_GENERATOR))
+        .build();
+  }
 
   /**
    * In native code, private values start with $.
    * In Skylark, private values start with _, because of the grammar.
    */
-  private static String attributeToNative(String oldName, Location loc, boolean isLateBound)
+  public static String attributeToNative(String oldName, Location loc, boolean isLateBound)
       throws EvalException {
     if (oldName.isEmpty()) {
       throw new EvalException(loc, "Attribute name cannot be empty");
@@ -269,7 +267,8 @@ public class SkylarkRuleClassFunctions {
             doc = "Whether this rule is a test rule. "
             + "If True, the rule must end with <code>_test</code> (otherwise it must not), "
             + "and there must be an action that generates <code>ctx.outputs.executable</code>."),
-        @Param(name = "attrs", type = Map.class, noneable = true, defaultValue = "None", doc =
+        @Param(name = "attrs", type = SkylarkDict.class, noneable = true, defaultValue = "None",
+            doc =
             "dictionary to declare all the attributes of the rule. It maps from an attribute name "
             + "to an attribute object (see <a href=\"attr.html\">attr</a> module). "
             + "Attributes starting with <code>_</code> are private, and can be used to add "
@@ -278,7 +277,7 @@ public class SkylarkRuleClassFunctions {
             + "<code>deprecation</code>, <code>tags</code>, <code>testonly</code>, and "
             + "<code>features</code> are implicitly added and might be overriden."),
             // TODO(bazel-team): need to give the types of these builtin attributes
-        @Param(name = "outputs", type = Map.class, callbackEnabled = true, noneable = true,
+        @Param(name = "outputs", type = SkylarkDict.class, callbackEnabled = true, noneable = true,
             defaultValue = "None", doc = "outputs of this rule. "
             + "It is a dictionary mapping from string to a template name. "
             + "For example: <code>{\"ext\": \"%{name}.ext\"}</code>. <br>"
@@ -311,7 +310,8 @@ public class SkylarkRuleClassFunctions {
         throws EvalException, ConversionException {
       funcallEnv.checkLoadingPhase("rule", ast.getLocation());
       RuleClassType type = test ? RuleClassType.TEST : RuleClassType.NORMAL;
-      RuleClass parent = test ? testBaseRule : (executable ? binaryBaseRule : baseRule);
+      RuleClass parent = test ? getTestBaseRule(funcallEnv.getToolsRepository())
+          : (executable ? binaryBaseRule : baseRule);
 
       // We'll set the name later, pass the empty string for now.
       RuleClass.Builder builder = new RuleClass.Builder("", type, true, parent);
@@ -390,12 +390,12 @@ public class SkylarkRuleClassFunctions {
 
 
   @SkylarkSignature(name = "aspect", doc =
-    "Creates a new aspect. The result of this fucntion must be stored in a global value.",
+    "Creates a new aspect. The result of this function must be stored in a global value.",
     returnType = SkylarkAspect.class,
     mandatoryPositionals = {
         @Param(name = "implementation", type = BaseFunction.class,
             doc = "the function implementing this aspect. Must have two parameters: "
-            + "<a href=\"Target.html\">Target</a> (the target to which the aspect is applied) and"
+            + "<a href=\"Target.html\">Target</a> (the target to which the aspect is applied) and "
             + "<a href=\"ctx.html\">ctx</a>. Attributes of the target are available via ctx.rule "
             + " field. The function is called during the analysis phase for each application of "
             + "an aspect to a target."
@@ -407,14 +407,17 @@ public class SkylarkRuleClassFunctions {
         doc = "List of attribute names.  The aspect propagates along dependencies specified by "
         + " attributes of a target with this name"
       ),
-      @Param(name = "attrs", type = Map.class, noneable = true, defaultValue = "None",
+      @Param(name = "attrs", type = SkylarkDict.class, noneable = true, defaultValue = "None",
         doc = "dictionary to declare all the attributes of the aspect.  "
         + "It maps from an attribute name to an attribute object "
         + "(see <a href=\"attr.html\">attr</a> module). "
         + "Aspect attributes are available to implementation function as fields of ctx parameter. "
-        + "All aspect attributes must be private, so their names must start with <code>_</code>. "
-        + "All aspect attributes must be have default values, and be of type "
-        + "<code>label</code> or <code>label_list</code>"
+        + "Implicit attributes starting with <code>_</code> must have default values, and have "
+        + "type <code>label</code> or <code>label_list</code>."
+        + "Explicit attributes must have type <code>string</code>, and must use the "
+        + "<code>values</code> restriction. If explicit attributes are present, the aspect can "
+        + "only be used with rules that have attributes of the same name and type, with valid "
+        + "values. "
       ),
       @Param(
         name = "fragments",
@@ -462,31 +465,55 @@ public class SkylarkRuleClassFunctions {
             }
           }
 
-          ImmutableList<Pair<String, SkylarkAttr.Descriptor>> attributes =
+          ImmutableList<Pair<String, SkylarkAttr.Descriptor>> descriptors =
               attrObjectToAttributesList(attrs, ast);
-          for (Pair<String, Descriptor> attribute : attributes) {
-            String nativeName = attribute.getFirst();
-            if (!Attribute.isImplicit(nativeName)) {
-              throw new EvalException(
-                  ast.getLocation(),
-                  String.format(
-                      "Aspect attribute '%s' must be implicit (its name should start with '_').",
-                      nativeName));
+          ImmutableList.Builder<Attribute> attributes = ImmutableList.builder();
+          ImmutableSet.Builder<String> requiredParams = ImmutableSet.<String>builder();
+          for (Pair<String, Descriptor> descriptor : descriptors) {
+            String nativeName = descriptor.getFirst();
+            boolean hasDefault = descriptor.getSecond().getAttributeBuilder().isValueSet();
+            Attribute attribute = descriptor.second.getAttributeBuilder().build(descriptor.first);
+            if (attribute.getType() == Type.STRING
+                && ((String) attribute.getDefaultValue(null)).isEmpty()) {
+              hasDefault = false;  // isValueSet() is always true for attr.string.
             }
-
-            String skylarkName = "_" + nativeName.substring(1);
-
-            if (!attribute.getSecond().getAttributeBuilder().isValueSet()) {
+            if (!Attribute.isImplicit(nativeName)) {
+              if (!attribute.checkAllowedValues() || attribute.getType() != Type.STRING) {
+                throw new EvalException(
+                    ast.getLocation(),
+                    String.format(
+                        "Aspect parameter attribute '%s' must have type 'string' and use the "
+                        + "'values' restriction.",
+                        nativeName));
+              }
+              if (!hasDefault) {
+                requiredParams.add(nativeName);
+              } else {
+                PredicateWithMessage<Object> allowed = attribute.getAllowedValues();
+                Object defaultVal = attribute.getDefaultValue(null);
+                if (!allowed.apply(defaultVal)) {
+                  throw new EvalException(
+                      ast.getLocation(),
+                      String.format(
+                          "Aspect parameter attribute '%s' has a bad default value: %s",
+                          nativeName,
+                          allowed.getErrorReason(defaultVal)));
+                }
+              }
+            } else if (!hasDefault) {  // Implicit attribute
+              String skylarkName = "_" + nativeName.substring(1);
               throw new EvalException(
                   ast.getLocation(),
                   String.format("Aspect attribute '%s' has no default value.", skylarkName));
             }
+            attributes.add(attribute);
           }
 
           return new SkylarkAspect(
               implementation,
               attrAspects.build(),
-              attributes,
+              attributes.build(),
+              requiredParams.build(),
               ImmutableSet.copyOf(fragments.getContents(String.class, "fragments")),
               ImmutableSet.copyOf(hostFragments.getContents(String.class, "host_fragments")),
               funcallEnv);
@@ -525,6 +552,24 @@ public class SkylarkRuleClassFunctions {
           throw new EvalException(ast.getLocation(),
               "Invalid rule class hasn't been exported by a Skylark file");
         }
+
+        for (Attribute attribute : ruleClass.getAttributes()) {
+          // TODO(dslomov): If a Skylark parameter extractor is specified for this aspect, its
+          // attributes may not be required.
+          for (Map.Entry<String, ImmutableSet<String>> attrRequirements :
+               attribute.getRequiredAspectParameters().entrySet()) {
+            for (String required : attrRequirements.getValue()) {
+              if (!ruleClass.hasAttr(required, Type.STRING)) {
+                throw new EvalException(definitionLocation, String.format(
+                    "Aspect %s requires rule %s to specify attribute '%s' with type string.",
+                    attrRequirements.getKey(),
+                    ruleClass.getName(),
+                    required));
+              }
+            }
+          }
+        }
+
         PackageContext pkgContext = (PackageContext) env.lookup(PackageFactory.PKG_CONTEXT);
         BuildLangTypedAttributeValuesMap attributeValues =
             new BuildLangTypedAttributeValuesMap((Map<String, Object>) args[0]);
@@ -552,7 +597,7 @@ public class SkylarkRuleClassFunctions {
             throw new EvalException(definitionLocation,
                 "All aspects applied to rule dependencies must be top-level values");
           }
-          attributeBuilder.aspect(skylarkAspect.getAspectClass());
+          attributeBuilder.aspect(skylarkAspect);
         }
 
         addAttribute(definitionLocation, builder,
@@ -612,16 +657,36 @@ public class SkylarkRuleClassFunctions {
       + "Example: <br><pre class=language-python>Label(\"//tools:default\")</pre>",
       returnType = Label.class,
       mandatoryPositionals = {@Param(name = "label_string", type = String.class,
-            doc = "the label string")},
-      useLocation = true)
+          doc = "the label string")},
+      optionalNamedOnly = {@Param(
+          name = "relative_to_caller_repository",
+          type = Boolean.class,
+          defaultValue = "False",
+          doc = "whether the label should be resolved relative to the label of the file this "
+              + "function is called from.")},
+      useLocation = true,
+      useEnvironment = true)
   private static final BuiltinFunction label = new BuiltinFunction("Label") {
-      public Label invoke(String labelString,
-          Location loc) throws EvalException, ConversionException {
-          try {
-            return labelCache.get(labelString);
-          } catch (ExecutionException e) {
-            throw new EvalException(loc, "Illegal absolute label syntax: " + labelString);
+      @SuppressWarnings({"unchecked", "unused"})
+      public Label invoke(
+          String labelString, Boolean relativeToCallerRepository, Location loc, Environment env)
+          throws EvalException {
+        Label parentLabel = null;
+        if (relativeToCallerRepository) {
+          parentLabel = env.getCallerLabel();
+        } else {
+          parentLabel = env.getGlobals().label();
+        }
+        try {
+          if (parentLabel != null) {
+            LabelValidator.parseAbsoluteLabel(labelString);
+            labelString = parentLabel.getRelative(labelString)
+                .getUnambiguousCanonicalForm();
           }
+          return labelCache.get(labelString);
+        } catch (LabelValidator.BadLabelException | LabelSyntaxException | ExecutionException e) {
+          throw new EvalException(loc, "Illegal absolute label syntax: " + labelString);
+        }
       }
     };
 
@@ -680,7 +745,7 @@ public class SkylarkRuleClassFunctions {
           printTextMessage((ClassObject) value, sb, indent + 1, loc);
           print(sb, "}", indent);
         } else if (value instanceof String) {
-          print(sb, key + ": \"" + escape((String) value) + "\"", indent);
+          print(sb, key + ": \"" + escapeString((String) value) + "\"", indent);
         } else if (value instanceof Integer) {
           print(sb, key + ": " + value, indent);
         } else if (value instanceof Boolean) {
@@ -707,11 +772,6 @@ public class SkylarkRuleClassFunctions {
         }
       }
 
-      private String escape(String string) {
-        // TODO(bazel-team): use guava's SourceCodeEscapers when it's released.
-        return string.replace("\"", "\\\"").replace("\n", "\\n");
-      }
-
       private void print(StringBuilder sb, String text, int indent) {
         for (int i = 0; i < indent; i++) {
           sb.append("  ");
@@ -720,6 +780,89 @@ public class SkylarkRuleClassFunctions {
       sb.append("\n");
       }
     };
+
+  // Escapes the given string for use in Proto messages or JSON strings.
+  private static String escapeString(String string) {
+    // TODO(bazel-team): use guava's SourceCodeEscapers when it's released.
+    return string.replace("\"", "\\\"").replace("\n", "\\n");
+  }
+
+  @SkylarkSignature(name = "to_json",
+      doc = "Creates a JSON string from the struct parameter. This method only works if all "
+          + "struct elements (recursively) are strings, ints, booleans, other structs or a "
+          + "list of these types. Quotes and new lines in strings are escaped. "
+          + "Examples:<br><pre class=language-python>"
+          + "struct(key=123).to_json()\n# {\"key\":123}\n\n"
+          + "struct(key=True).to_json()\n# {\"key\":true}\n\n"
+          + "struct(key=[1, 2, 3]).to_json()\n# {\"key\":[1,2,3]}\n\n"
+          + "struct(key='text').to_json()\n# {\"key\":\"text\"}\n\n"
+          + "struct(key=struct(inner_key='text')).to_json()\n"
+          + "# {\"key\":{\"inner_key\":\"text\"}}\n\n"
+          + "struct(key=[struct(inner_key=1), struct(inner_key=2)]).to_json()\n"
+          + "# {\"key\":[{\"inner_key\":1},{\"inner_key\":2}]}\n\n"
+          + "struct(key=struct(inner_key=struct(inner_inner_key='text'))).to_json()\n"
+          + "# {\"key\":{\"inner_key\":{\"inner_inner_key\":\"text\"}}}\n</pre>",
+      objectType = SkylarkClassObject.class, returnType = String.class,
+      mandatoryPositionals = {
+          // TODO(bazel-team): shouldn't we accept any ClassObject?
+          @Param(name = "self", type = SkylarkClassObject.class,
+              doc = "this struct")},
+      useLocation = true)
+  private static final BuiltinFunction toJson = new BuiltinFunction("to_json") {
+    public String invoke(SkylarkClassObject self, Location loc) throws EvalException {
+      StringBuilder sb = new StringBuilder();
+      printJson(self, sb, loc, "struct field", null);
+      return sb.toString();
+    }
+
+    private void printJson(Object value, StringBuilder sb, Location loc, String container,
+        String key) throws EvalException {
+      if (value == Runtime.NONE) {
+        sb.append("null");
+      } else if (value instanceof ClassObject) {
+        sb.append("{");
+
+        String join = "";
+        for (String subKey : ((ClassObject) value).getKeys()) {
+          sb.append(join);
+          join = ",";
+          sb.append("\"");
+          sb.append(subKey);
+          sb.append("\":");
+          printJson(((ClassObject) value).getValue(subKey), sb, loc, "struct field", subKey);
+        }
+        sb.append("}");
+      } else if (value instanceof List) {
+        sb.append("[");
+        String join = "";
+        for (Object item : ((List) value)) {
+          sb.append(join);
+          join = ",";
+          printJson(item, sb, loc, "list element in struct field", key);
+        }
+        sb.append("]");
+      } else if (value instanceof String) {
+        sb.append("\"");
+        sb.append(jsonEscapeString((String) value));
+        sb.append("\"");
+      } else if (value instanceof Integer || value instanceof Boolean) {
+        sb.append(value);
+      } else {
+        String errorMessage = "Invalid text format, expected a struct, a string, a bool, or an int "
+            + "but got a " + EvalUtils.getDataTypeName(value) + " for " + container;
+        if (key != null) {
+          errorMessage += " '" + key + "'";
+        }
+        throw new EvalException(loc, errorMessage);
+      }
+    }
+
+    private String jsonEscapeString(String string) {
+      return escapeString(string.replace("\\", "\\\\")
+          .replace("\r", "\\r")
+          .replace("\t", "\\t"));
+    }
+  };
 
   @SkylarkSignature(name = "output_group",
       documented = false, //  TODO(dslomov): document.
@@ -746,160 +889,5 @@ public class SkylarkRuleClassFunctions {
 
   static {
     SkylarkSignatureProcessor.configureSkylarkFunctions(SkylarkRuleClassFunctions.class);
-  }
-
-  /**
-   * A Skylark value that is a result of 'aspect(..)' function call.
-   */
-  public static final class SkylarkAspect implements SkylarkValue {
-    private final BaseFunction implementation;
-    private final ImmutableList<String> attributeAspects;
-    private final ImmutableList<Pair<String, Descriptor>> attributes;
-    private final ImmutableSet<String> fragments;
-    private final ImmutableSet<String> hostFragments;
-    private final Environment funcallEnv;
-    private Exported exported;
-
-    public SkylarkAspect(
-        BaseFunction implementation,
-        ImmutableList<String> attributeAspects,
-        ImmutableList<Pair<String, Descriptor>> attributes,
-        ImmutableSet<String> fragments,
-        ImmutableSet<String> hostFragments,
-        Environment funcallEnv) {
-      this.implementation = implementation;
-      this.attributeAspects = attributeAspects;
-      this.attributes = attributes;
-      this.fragments = fragments;
-      this.hostFragments = hostFragments;
-      this.funcallEnv = funcallEnv;
-    }
-
-    public BaseFunction getImplementation() {
-      return implementation;
-    }
-
-    public ImmutableList<String> getAttributeAspects() {
-      return attributeAspects;
-    }
-
-    public Environment getFuncallEnv() {
-      return funcallEnv;
-    }
-
-    public ImmutableList<Pair<String, Descriptor>> getAttributes() {
-      return attributes;
-    }
-
-    /**
-     * Gets the set of configuration fragment names needed in the target configuration.
-     */
-    public ImmutableSet<String> getFragments() {
-      return fragments;
-    }
-
-    /**
-     * Gets the set of configuration fragment names needed in the host configuration.
-     */
-    public ImmutableSet<String> getHostFragments() {
-      return hostFragments;
-    }
-
-    @Override
-    public boolean isImmutable() {
-      return implementation.isImmutable();
-    }
-
-    @Override
-    public void write(Appendable buffer, char quotationMark) {
-      Printer.append(buffer, "Aspect:");
-      implementation.write(buffer, quotationMark);
-    }
-
-    public String getName() {
-      return getAspectClass().getName();
-    }
-
-    public SkylarkAspectClass getAspectClass() {
-      Preconditions.checkState(isExported());
-      return new SkylarkAspectClassImpl(this);
-    }
-
-    void export(Label extensionLabel, String name) {
-      this.exported = new Exported(extensionLabel, name);
-    }
-
-    public boolean isExported() {
-      return exported != null;
-    }
-
-    private Label getExtensionLabel() {
-      Preconditions.checkArgument(isExported());
-      return exported.extensionLabel;
-    }
-
-    private String getExportedName() {
-      Preconditions.checkArgument(isExported());
-      return exported.name;
-    }
-
-    @Immutable
-    private static class Exported {
-      private final Label extensionLabel;
-      private final String name;
-
-      public Exported(Label extensionLabel, String name) {
-        this.extensionLabel = extensionLabel;
-        this.name = name;
-      }
-
-      @Override
-      public String toString() {
-        return extensionLabel.toString() + "%" + name;
-      }
-    }
-  }
-
-  /**
-   * Implementation of an aspect class defined in Skylark.
-   */
-  @Immutable
-  private static final class SkylarkAspectClassImpl extends SkylarkAspectClass {
-    private final AspectDefinition aspectDefinition;
-    private final Label extensionLabel;
-    private final String exportedName;
-
-    public SkylarkAspectClassImpl(SkylarkAspect skylarkAspect) {
-      Preconditions.checkArgument(skylarkAspect.isExported(), "Skylark aspects must be exported");
-      this.extensionLabel = skylarkAspect.getExtensionLabel();
-      this.exportedName = skylarkAspect.getExportedName();
-
-      AspectDefinition.Builder builder = new AspectDefinition.Builder(getName());
-      for (String attributeAspect : skylarkAspect.getAttributeAspects()) {
-        builder.attributeAspect(attributeAspect, this);
-      }
-      ImmutableList<Pair<String, Descriptor>> attributes = skylarkAspect.getAttributes();
-      for (Pair<String, Descriptor> attribute : attributes) {
-        builder.add(attribute.second.getAttributeBuilder().build(attribute.first));
-      }
-      builder.requiresConfigurationFragmentsBySkylarkModuleName(skylarkAspect.getFragments());
-      builder.requiresHostConfigurationFragmentsBySkylarkModuleName(
-          skylarkAspect.getHostFragments());
-      this.aspectDefinition = builder.build();
-    }
-
-    @Override
-    public AspectDefinition getDefinition(AspectParameters aspectParameters) {
-      return aspectDefinition;
-    }
-
-    public Label getExtensionLabel() {
-      return extensionLabel;
-    }
-
-    public String getExportedName() {
-      return exportedName;
-    }
-
   }
 }

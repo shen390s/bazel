@@ -30,13 +30,19 @@ fi
 
 : ${JAVA_VERSION:="1.8"}
 
-: ${BAZEL_ARGS:=--singlejar_top=//src/java_tools/singlejar:bootstrap_deploy.jar \
-      --javabuilder_top=//src/java_tools/buildjar:bootstrap_deploy.jar \
-      --genclass_top=//src/java_tools/buildjar:bootstrap_genclass_deploy.jar \
-      --ijar_top=//third_party/ijar \
-      --strategy=Javac=worker --worker_quit_after_build \
-      --genrule_strategy=standalone --spawn_strategy=standalone \
-      "${EXTRA_BAZEL_ARGS:-}"}
+if [ "${JAVA_VERSION}" = "1.7" ]; then
+  : ${BAZEL_ARGS:=--java_toolchain=//src/java_tools/buildjar:bootstrap_toolchain_jdk7 \
+        --host_java_toolchain=//src/java_tools/buildjar:bootstrap_toolchain_jdk7 \
+        --define JAVA_VERSION=1.7 \
+        --genrule_strategy=standalone --spawn_strategy=standalone \
+        "${EXTRA_BAZEL_ARGS:-}"}
+else
+  : ${BAZEL_ARGS:=--java_toolchain=//src/java_tools/buildjar:bootstrap_toolchain \
+        --host_java_toolchain=//src/java_tools/buildjar:bootstrap_toolchain \
+        --strategy=Javac=worker --worker_quit_after_build \
+        --genrule_strategy=standalone --spawn_strategy=standalone \
+        "${EXTRA_BAZEL_ARGS:-}"}
+fi
 
 if [ -z "${BAZEL-}" ]; then
   function bazel_build() {
@@ -78,13 +84,17 @@ function bootstrap_test() {
   local BAZEL_BIN=$1
   local BAZEL_SUM=$2
   local BAZEL_TARGET=${3:-src:bazel}
+  local STRATEGY="--strategy=Javac=worker --worker_quit_after_build"
+  if [ "${JAVA_VERSION}" = "1.7" ]; then
+    STRATEGY=
+  fi
   [ -x "${BAZEL_BIN}" ] || fail "syntax: bootstrap bazel-binary"
-  run_silent ${BAZEL_BIN} --nomaster_bazelrc --bazelrc=${BAZELRC} clean \
+  run ${BAZEL_BIN} --nomaster_bazelrc --bazelrc=${BAZELRC} clean \
       --expunge || return $?
-  run_silent ${BAZEL_BIN} --nomaster_bazelrc --bazelrc=${BAZELRC} build \
-      ${EXTRA_BAZEL_ARGS-} \
-      --strategy=Javac=worker --worker_quit_after_build \
+  run ${BAZEL_BIN} --nomaster_bazelrc --bazelrc=${BAZELRC} build \
+      ${EXTRA_BAZEL_ARGS-} ${STRATEGY} \
       --fetch --nostamp \
+      --define "JAVA_VERSION=${JAVA_VERSION}" \
       --javacopt="-source ${JAVA_VERSION} -target ${JAVA_VERSION}" \
       ${BAZEL_TARGET} || return $?
   if [ -n "${BAZEL_SUM}" ]; then

@@ -3,9 +3,15 @@
 import os
 import re
 import sys
+import subprocess
 
+# Return True if running on Windows
+def IsWindows():
+  return os.name == 'nt'
 
 PYTHON_BINARY = '%python_binary%'
+if IsWindows() and not PYTHON_BINARY.endswith('.exe'):
+  PYTHON_BINARY = PYTHON_BINARY + '.exe'
 
 # Find a file in a given search path.
 def SearchPath(name):
@@ -13,7 +19,7 @@ def SearchPath(name):
   for directory in search_path:
     if directory == '': continue
     path = os.path.join(directory, name)
-    if os.path.exists(path):
+    if os.path.isfile(path) and os.access(path, os.X_OK):
       return path
   return None
 
@@ -57,7 +63,10 @@ def Main():
       stub_filename = os.path.join(os.path.dirname(stub_filename), link)
       continue
 
-    matchobj = re.match("(.*\.runfiles)/.*", os.path.abspath(sys.argv[0]))
+    runfiles_pattern = "(.*\.runfiles)/.*"
+    if IsWindows():
+      runfiles_pattern = "(.*\.runfiles)\\.*"
+    matchobj = re.match(runfiles_pattern, os.path.abspath(sys.argv[0]))
     if matchobj:
       module_space = matchobj.group(1)
       break
@@ -68,16 +77,17 @@ def Main():
   python_imports = '%imports%'
   python_path_entries = CreatePythonPathEntries(python_imports, module_space)
 
-  external_dir = os.path.join(module_space, 'external')
-  if os.path.isdir(external_dir):
-    external_entries = [os.path.join(external_dir, d) for d in os.listdir(external_dir)]
-    repositories = [d for d in external_entries if os.path.isdir(d)]
-    python_path_entries += repositories
+  repo_dirs = [os.path.join(module_space, d) for d in os.listdir(module_space)]
+  repositories = [d for d in repo_dirs if os.path.isdir(d)]
+  python_path_entries += repositories
 
   old_python_path = os.environ.get('PYTHONPATH')
-  python_path = ':'.join(python_path_entries)
+  separator = ':'
+  if IsWindows():
+    separator = ';'
+  python_path = separator.join(python_path_entries)
   if old_python_path:
-    python_path += ':' + old_python_path
+    python_path += separator + old_python_path
 
   new_env['PYTHONPATH'] = python_path
 
@@ -99,7 +109,7 @@ def Main():
 
   try:
     sys.stdout.flush()
-    os.execv(program, args)
+    exit(subprocess.call(args))
   except EnvironmentError as e:
     # This exception occurs when os.execv() fails for some reason.
     if not getattr(e, 'filename', None):

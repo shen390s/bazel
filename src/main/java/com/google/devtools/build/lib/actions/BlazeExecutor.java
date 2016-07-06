@@ -107,6 +107,7 @@ public final class BlazeExecutor implements Executor {
       if (annotation != null) {
         contextMap.put(annotation.contextType(), context);
       }
+      contextMap.put(context.getClass(), context);
     }
 
     for (ActionContextProvider factory : contextProviders) {
@@ -145,7 +146,7 @@ public final class BlazeExecutor implements Executor {
    */
   @Override
   public void reportSubcommand(String reason, String message) {
-    reporter.handle(new Event(EventKind.SUBCOMMAND, null, "# " + reason + "\n" + message));
+    reporter.handle(Event.of(EventKind.SUBCOMMAND, null, "# " + reason + "\n" + message));
   }
 
   /**

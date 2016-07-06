@@ -20,8 +20,7 @@ import com.google.common.io.ByteStreams;
 import com.google.common.io.Files;
 import com.google.devtools.build.lib.actions.ExecException;
 import com.google.devtools.build.lib.actions.UserExecException;
-import com.google.devtools.build.lib.analysis.config.BinTools;
-import com.google.devtools.build.lib.runtime.BlazeRuntime;
+import com.google.devtools.build.lib.runtime.CommandEnvironment;
 import com.google.devtools.build.lib.shell.AbnormalTerminationException;
 import com.google.devtools.build.lib.shell.Command;
 import com.google.devtools.build.lib.shell.CommandException;
@@ -47,6 +46,11 @@ import java.util.List;
 public class NamespaceSandboxRunner {
   private static final String NAMESPACE_SANDBOX =
       "namespace-sandbox" + OsUtils.executableExtension();
+  private static final String SANDBOX_TIP =
+      "\n\nSandboxed execution failed, which may be legitimate (e.g. a compiler error), "
+          + "or due to missing dependencies. To enter the sandbox environment for easier debugging,"
+          + " run the following command in parentheses. On command failure, "
+          + "a bash shell running inside the sandbox will then automatically be spawned:\n\n";
   private final Path execRoot;
   private final Path sandboxPath;
   private final Path sandboxExecRoot;
@@ -74,11 +78,11 @@ public class NamespaceSandboxRunner {
     this.sandboxDebug = sandboxDebug;
   }
 
-  static boolean isSupported(BlazeRuntime runtime) {
-    Path execRoot = runtime.getExecRoot();
-    BinTools binTools = runtime.getBinTools();
+  static boolean isSupported(CommandEnvironment commandEnv) {
+    Path execRoot = commandEnv.getExecRoot();
 
-    PathFragment embeddedTool = binTools.getExecPath(NAMESPACE_SANDBOX);
+    PathFragment embeddedTool =
+        commandEnv.getBlazeWorkspace().getBinTools().getExecPath(NAMESPACE_SANDBOX);
     if (embeddedTool == null) {
       // The embedded tool does not exist, meaning that we don't support sandboxing (e.g., while
       // bootstrapping).
@@ -198,8 +202,9 @@ public class NamespaceSandboxRunner {
       }
       String message =
           CommandFailureUtils.describeCommandFailure(
-              verboseFailures, spawnArguments, env, cwd.getPath());
-      throw new UserExecException(message, e, timedOut);
+              verboseFailures, commandLineArgs, env, cwd.getPath());
+      String finalMsg = (sandboxDebug && verboseFailures) ? SANDBOX_TIP + message : message;
+      throw new UserExecException(finalMsg, e, timedOut);
     } finally {
       copyOutputs(outputs);
     }
@@ -230,7 +235,7 @@ public class NamespaceSandboxRunner {
     if (sandboxPath.exists()) {
       FileSystemUtils.deleteTree(sandboxPath);
     }
-    if (argumentsFilePath.exists()) {
+    if (!sandboxDebug && argumentsFilePath.exists()) {
       argumentsFilePath.delete();
     }
   }

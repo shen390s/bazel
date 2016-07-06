@@ -18,7 +18,6 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
-
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -38,7 +37,7 @@ import javax.annotation.concurrent.Immutable;
  * Therefore this class can be used internally to cache the results.
  */
 @Immutable
-final class OptionsData {
+final class OptionsData extends OpaqueOptionsData {
 
   /**
    * These are the options-declaring classes which are annotated with
@@ -76,7 +75,7 @@ final class OptionsData {
    * values.
    */
   private final Map<Field, Boolean> allowMultiple;
-  
+
   private OptionsData(Map<Class<? extends OptionsBase>, Constructor<?>> optionsClasses,
                       Map<String, Field> nameToField,
                       Map<Character, Field> abbrevToField,
@@ -130,7 +129,7 @@ final class OptionsData {
   public boolean getAllowMultiple(Field field) {
     return allowMultiple.get(field);
   }
-  
+
   private static List<Field> getAllAnnotatedFields(Class<? extends OptionsBase> optionsClass) {
     List<Field> allFields = Lists.newArrayList();
     for (Field field : optionsClass.getFields()) {
@@ -145,21 +144,29 @@ final class OptionsData {
   }
 
   private static Object retrieveDefaultFromAnnotation(Field optionField) {
-    Option annotation = optionField.getAnnotation(Option.class);
-    // If an option can be specified multiple times, its default value is a new empty list.
-    if (annotation.allowMultiple()) {
+    Converter<?> converter = OptionsParserImpl.findConverter(optionField);
+    String defaultValueAsString = OptionsParserImpl.getDefaultOptionString(optionField);
+    // Special case for "null"
+    if (OptionsParserImpl.isSpecialNullDefault(defaultValueAsString, optionField)) {
+      return null;
+    }
+    boolean allowsMultiple = optionField.getAnnotation(Option.class).allowMultiple();
+    // If the option allows multiple values then we intentionally return the empty list as
+    // the default value of this option since it is not always the case that an option
+    // that allows multiple values will have a converter that returns a list value.
+    if (allowsMultiple) {
       return Collections.emptyList();
     }
-    String defaultValueString = OptionsParserImpl.getDefaultOptionString(optionField);
+    // Otherwise try to convert the default value using the converter
+    Object convertedValue;
     try {
-      return OptionsParserImpl.isSpecialNullDefault(defaultValueString, optionField)
-          ? null
-          : OptionsParserImpl.findConverter(optionField).convert(defaultValueString);
+      convertedValue = converter.convert(defaultValueAsString);
     } catch (OptionsParsingException e) {
       throw new IllegalStateException("OptionsParsingException while "
           + "retrieving default for " + optionField.getName() + ": "
           + e.getMessage());
     }
+    return convertedValue;
   }
 
   static OptionsData of(Collection<Class<? extends OptionsBase>> classes) {
@@ -276,7 +283,7 @@ final class OptionsData {
         optionDefaultsBuilder.put(field, retrieveDefaultFromAnnotation(field));
 
         convertersBuilder.put(field, OptionsParserImpl.findConverter(field));
-        
+
         allowMultipleBuilder.put(field, annotation.allowMultiple());
       }
     }

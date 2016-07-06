@@ -14,7 +14,6 @@
 
 package com.google.devtools.build.lib.rules.objc;
 
-import com.google.common.collect.ImmutableSet;
 import com.google.common.io.ByteSource;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.rules.apple.AppleConfiguration;
@@ -36,22 +35,17 @@ final class BundleMergeControlBytes extends ByteSource {
   private final Bundling rootBundling;
   private final Artifact mergedIpa;
   private final AppleConfiguration appleConfiguration;
-  private final ImmutableSet<TargetDeviceFamily> families;
 
   public BundleMergeControlBytes(
-      Bundling rootBundling, Artifact mergedIpa, AppleConfiguration appleConfiguration,
-      ImmutableSet<TargetDeviceFamily> families) {
+      Bundling rootBundling, Artifact mergedIpa, AppleConfiguration appleConfiguration) {
     this.rootBundling = Preconditions.checkNotNull(rootBundling);
     this.mergedIpa = Preconditions.checkNotNull(mergedIpa);
     this.appleConfiguration = Preconditions.checkNotNull(appleConfiguration);
-    this.families = Preconditions.checkNotNull(families);
   }
 
   @Override
   public InputStream openStream() {
-    return control("", rootBundling)
-        .toByteString()
-        .newInput();
+    return control("", rootBundling).toByteString().newInput();
   }
 
   private Control control(String mergeZipPrefix, Bundling bundling) {
@@ -69,7 +63,7 @@ final class BundleMergeControlBytes extends ByteSource {
     if (bundling.getBundleInfoplist().isPresent()) {
       control.setBundleInfoPlistFile((bundling.getBundleInfoplist().get().getExecPathString()));
     }
-    
+
     for (Artifact mergeZip : bundling.getMergeZips()) {
       control.addMergeZip(MergeZip.newBuilder()
           .setEntryNamePrefix(mergeZipPrefix)
@@ -77,8 +71,11 @@ final class BundleMergeControlBytes extends ByteSource {
           .build());
     }
 
-    for (TargetDeviceFamily targetDeviceFamily : families) {
-      control.addTargetDeviceFamily(targetDeviceFamily.name());
+    for (Artifact rootMergeZip : bundling.getRootMergeZips()) {
+      control.addMergeZip(MergeZip.newBuilder()
+          .setEntryNamePrefix("")
+          .setSourcePath(rootMergeZip.getExecPathString())
+          .build());
     }
 
     control.setOutFile(mergedIpa.getExecPathString());

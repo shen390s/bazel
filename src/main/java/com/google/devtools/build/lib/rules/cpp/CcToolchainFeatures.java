@@ -15,6 +15,9 @@
 package com.google.devtools.build.lib.rules.cpp;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Optional;
+import com.google.common.base.Preconditions;
+import com.google.common.base.Predicate;
 import com.google.common.cache.CacheBuilder;
 import com.google.common.cache.CacheLoader;
 import com.google.common.cache.LoadingCache;
@@ -22,9 +25,12 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableMultimap;
 import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Iterables;
 import com.google.devtools.build.lib.analysis.config.InvalidConfigurationException;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
+import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.lib.view.config.crosstool.CrosstoolConfig.CToolchain;
+import com.google.devtools.build.lib.view.config.crosstool.CrosstoolConfig.CToolchain.Tool;
 
 import java.io.IOException;
 import java.io.ObjectInputStream;
@@ -485,10 +491,24 @@ public class CcToolchainFeatures implements Serializable {
   }
 
   /**
+   * An interface for classes representing crosstool messages that can activate eachother
+   * using 'requires' and 'implies' semantics.
+   *
+   * <p>Currently there are two types of CrosstoolActivatable: Feature and ActionConfig.
+   */
+  private interface CrosstoolSelectable {
+
+    /**
+     * Returns the name of this selectable.
+     */
+    String getName();
+  }
+
+  /**
    * Contains flags for a specific feature.
    */
   @Immutable
-  private static class Feature implements Serializable {
+  private static class Feature implements Serializable, CrosstoolSelectable {
     private final String name;
     private final ImmutableList<FlagSet> flagSets;
     private final ImmutableList<EnvSet> envSets;
@@ -500,6 +520,7 @@ public class CcToolchainFeatures implements Serializable {
         flagSetBuilder.add(new FlagSet(flagSet));
       }
       this.flagSets = flagSetBuilder.build();
+      
       ImmutableList.Builder<EnvSet> envSetBuilder = ImmutableList.builder();
       for (CToolchain.EnvSet flagSet : feature.getEnvSetList()) {
         envSetBuilder.add(new EnvSet(flagSet));
@@ -507,15 +528,16 @@ public class CcToolchainFeatures implements Serializable {
       this.envSets = envSetBuilder.build();
     }
 
-    /**
-     * @return the features's name.
-     */
-    private String getName() {
+    @Override
+    public String getName() {
       return name;
     }
 
-    private void expandEnvironment(String action, Variables variables,
-        ImmutableMap.Builder<String, String> envBuilder) {
+    /**
+     * Adds environment variables for the given action to the provided builder.
+     */
+    private void expandEnvironment(
+        String action, Variables variables, ImmutableMap.Builder<String, String> envBuilder) {
       for (EnvSet envSet : envSets) {
         envSet.expandEnvironment(action, variables, envBuilder);
       }
@@ -531,6 +553,114 @@ public class CcToolchainFeatures implements Serializable {
       }
     }
   }
+
+  /**
+   * An executable to be invoked by a blaze action.  Can carry information on its platform
+   * restrictions.
+   */
+  @Immutable
+  static class Tool {
+    private final String toolPathString;
+    private final ImmutableSet<String> executionRequirements;
+
+    private Tool(CToolchain.Tool tool) {
+      toolPathString = tool.getToolPath();
+      executionRequirements = ImmutableSet.copyOf(tool.getExecutionRequirementList());
+    }
+
+    @VisibleForTesting
+    public Tool(String toolPathString, ImmutableSet<String> executionRequirements) {
+      this.toolPathString = toolPathString;
+      this.executionRequirements = executionRequirements;
+    }
+
+    /**
+     * Returns the path to this action's tool relative to the provided crosstool path.
+     */
+    PathFragment getToolPath(PathFragment crosstoolTopPathFragment) {
+      return crosstoolTopPathFragment.getRelative(toolPathString);
+    }
+
+    /**
+     * Returns a list of requirement hints that apply to the execution of this tool.
+     */
+    ImmutableSet<String> getExecutionRequirements() {
+      return executionRequirements;
+    }
+  }
+  
+  
+  /**
+   * A container for information on a particular blaze action. 
+   * 
+   * <p>An ActionConfig can select a tool for its blaze action based on the set of active
+   * features.  Internally, an ActionConfig maintains an ordered list (the order being that of the
+   * list of tools in the crosstool action_config message) of such tools and the feature sets for 
+   * which they are valid.  For a given feature configuration, the ActionConfig will consider the
+   * first tool in that list with a feature set that matches the configuration to be the tool for
+   * its blaze action.
+   * 
+   * <p>ActionConfigs can be activated by features.  That is, a particular feature can cause an
+   * ActionConfig to be applied in its "implies" field.  Blaze may include certain actions in 
+   * the action graph only if a corresponding ActionConfig is activated in the toolchain - this 
+   * provides the crosstool with a mechanism for adding certain actions to the action graph based 
+   * on feature configuration.
+   * 
+   * <p>It is invalid for a toolchain to contain two action configs for the same blaze action.  In
+   * that case, blaze will throw an error when it consumes the crosstool.
+   */
+  @Immutable
+  private static class ActionConfig implements Serializable, CrosstoolSelectable {
+    private final String configName;
+    private final String actionName;
+    private final List<CToolchain.Tool> tools;
+
+    private ActionConfig(CToolchain.ActionConfig actionConfig) {
+      this.configName = actionConfig.getConfigName();
+      this.actionName = actionConfig.getActionName();
+      this.tools = actionConfig.getToolList();
+    }
+
+    @Override
+    public String getName() {
+      return configName;
+    }
+
+    /**
+     * Returns the name of the blaze action this action config applies to.
+     */
+    private String getActionName() {
+      return actionName;
+    }
+
+    /**
+     * Returns the path to this action's tool relative to the provided crosstool path given a set
+     * of enabled features.
+     */
+    private Tool getTool(final Set<String> enabledFeatureNames) {
+      Optional<CToolchain.Tool> tool =
+          Iterables.tryFind(
+              tools,
+              new Predicate<CToolchain.Tool>() {
+                // We select the first listed tool for which all specified features are activated
+                // in this configuration
+                @Override
+                public boolean apply(CToolchain.Tool input) {
+                  Collection<String> featureNamesForTool = input.getWithFeature().getFeatureList();
+                  return enabledFeatureNames.containsAll(featureNamesForTool);
+                }
+              });
+      if (tool.isPresent()) {
+        return new Tool(tool.get());
+      } else {
+        throw new IllegalArgumentException(
+            "Matching tool for action "
+                + getActionName()
+                + " not "
+                + "found for given feature configuration");
+      }
+    }
+  }
   
   /**
    * Configured build variables usable by the toolchain configuration.
@@ -541,8 +671,13 @@ public class CcToolchainFeatures implements Serializable {
     /**
      * Variables can be set as an arbitrarily deeply nested recursive sequence, which
      * we represent as a tree of {@code Sequence} nodes.
+     * The nodes are {@code NestedSequence} objects, while the leafs are {@code ValueSequence}
+     * objects. We do not allow {@code Value} objects in the tree, as the object memory overhead
+     * is too large when we have millions of values.
+     * If we find single element {@code ValueSequence} in memory profiles in the future, we
+     * can introduce another special case type.
      */
-    private interface Sequence {
+    interface Sequence {
 
       /**
        * Expands {@code expandable} under the given nested {@code view}, appending flags to
@@ -552,44 +687,74 @@ public class CcToolchainFeatures implements Serializable {
     }
 
     /**
-     * The leaves in the variable sequence node tree are simple values.
+     * A sequence of simple string values.
+     * Exists as a memory optimization - a typical build can contain millions of feature values,
+     * so getting rid of the overhead of {@code Value} objects significantly reduces memory
+     * overhead.
      */
-    private static class Value implements Sequence {
-      private final String value;
+    static class ValueSequence implements Sequence {
+      private final List<String> values;
 
-      private Value(String value) {
-        this.value = value;
+      /** Builder for value sequences. */
+      static class Builder {
+        private final ImmutableList.Builder<String> values = ImmutableList.builder();
+
+        /** Adds a value to the sequence. */
+        Builder addValue(String value) {
+          values.add(value);
+          return this;
+        }
+
+        /** Returns an immutable value sequence. */
+        ValueSequence build() {
+          return new ValueSequence(values.build());
+        }
+      }
+
+      private ValueSequence(List<String> values) {
+        this.values = values;
       }
 
       @Override
       public void expand(NestedView view, Expandable expandable, List<String> commandLine) {
-        view.expandValue(value, expandable, commandLine);
+        final ImmutableList.Builder<Sequence> sequences = ImmutableList.builder();
+        for (String value : values) {
+          sequences.add(new Value(value));
+        }
+        view.expandSequence(sequences.build(), expandable, commandLine);
+      }
+
+      /**
+       * The leaves in the variable sequence node tree are simple values. Note that this should
+       * never live outside of {@code expand}, as the object overhead is prohibitively expensive.
+       */
+      private static class Value implements Sequence {
+        private final String value;
+
+        private Value(String value) {
+          this.value = value;
+        }
+
+        @Override
+        public void expand(NestedView view, Expandable expandable, List<String> commandLine) {
+          view.expandValue(value, expandable, commandLine);
+        }
       }
     }
 
-    /**
-     * An internal nodes in the sequence node tree.
-     */
-    public static class NestedSequence implements Sequence {
+    /** An internal node in the sequence node tree. */
+    static class NestedSequence implements Sequence {
 
       /**
        * Builder for nested sequences.
        */
-      public static class Builder {
+      static class Builder {
         private final ImmutableList.Builder<Sequence> sequences = ImmutableList.builder();
-
-        /**
-         * Adds a value to the sequence.
-         */
-        public Builder addValue(String value) {
-          sequences.add(new Value(value));
-          return this;
-        }
 
         /**
          * Adds a sub-sequence to the sequence.
          */
-        public Builder addSequence(NestedSequence sequence) {
+        Builder addSequence(Sequence sequence) {
           sequences.add(sequence);
           return this;
         }
@@ -597,7 +762,7 @@ public class CcToolchainFeatures implements Serializable {
         /**
          * Returns an immutable nested sequence.
          */
-        public NestedSequence build() {
+        NestedSequence build() {
           return new NestedSequence(sequences.build());
         }
       }
@@ -628,11 +793,19 @@ public class CcToolchainFeatures implements Serializable {
         variables.put(name, value);
         return this;
       }
+     
+      /**
+       * Add all variables in a map.
+       */
+      public Builder addAllVariables(Map<String, String> variableMap) {
+        variables.putAll(variableMap);
+        return this;
+      }
       
       /**
        * Add a nested sequence that expands {@code name} recursively.
        */
-      public Builder addSequence(String name, NestedSequence sequence) {
+      public Builder addSequence(String name, Sequence sequence) {
         expandables.put(name, sequence);
         return this;
       }
@@ -642,7 +815,7 @@ public class CcToolchainFeatures implements Serializable {
        * entry in {@code values}.
        */
       public Builder addSequenceVariable(String name, Collection<String> values) {
-        NestedSequence.Builder sequenceBuilder = new NestedSequence.Builder();
+        ValueSequence.Builder sequenceBuilder = new ValueSequence.Builder();
         for (String value : values) {
           sequenceBuilder.addValue(value);
         }
@@ -652,9 +825,17 @@ public class CcToolchainFeatures implements Serializable {
       /**
        * @return a new {@Variables} object.
        */
-      public Variables build() {
+      Variables build() {
         return new Variables(variables.build(), expandables.build());
       }
+    }
+    
+    /**
+     * A group of extra {@code Variable} instances, packaged as logic for adding to a
+     * {@code Builder}
+     */
+    public interface VariablesExtension {
+      void addVariables(Builder builder);
     }
     
     /**
@@ -828,34 +1009,55 @@ public class CcToolchainFeatures implements Serializable {
   }
   
   /**
-   * Captures the set of enabled features for a rule.
+   * Captures the set of enabled features and action configs for a rule.
    */
   @Immutable
   public static class FeatureConfiguration {
     private final ImmutableSet<String> enabledFeatureNames;
-    private final ImmutableList<Feature> enabledFeatures;
+    private final Iterable<Feature> enabledFeatures;
+    
+    private final ImmutableMap<String, ActionConfig> actionConfigByActionName;
     
     public FeatureConfiguration() {
-      enabledFeatureNames = ImmutableSet.of();
-      enabledFeatures = ImmutableList.of();
+      this(
+          ImmutableList.<Feature>of(),
+          ImmutableList.<ActionConfig>of(),
+          ImmutableMap.<String, ActionConfig>of());
     }
-    
-    private FeatureConfiguration(ImmutableList<Feature> enabledFeatures) {
+
+    private FeatureConfiguration(
+        Iterable<Feature> enabledFeatures,
+        Iterable<ActionConfig> enabledActionConfigs,
+        ImmutableMap<String, ActionConfig> actionConfigByActionName) {
       this.enabledFeatures = enabledFeatures;
-      ImmutableSet.Builder<String> builder = ImmutableSet.builder();
+      
+      this.actionConfigByActionName = actionConfigByActionName;
+      ImmutableSet.Builder<String> featureBuilder = ImmutableSet.builder();
       for (Feature feature : enabledFeatures) {
-        builder.add(feature.getName());
+        featureBuilder.add(feature.getName());
       }
-      this.enabledFeatureNames = builder.build();
+      this.enabledFeatureNames = featureBuilder.build();
+
+      ImmutableSet.Builder<String> actionConfigBuilder = ImmutableSet.builder();
+      for (ActionConfig actionConfig : enabledActionConfigs) {
+        actionConfigBuilder.add(actionConfig.getName());
+      }
     }
     
     /**
      * @return whether the given {@code feature} is enabled.
      */
-    boolean isEnabled(String feature) {
+    public boolean isEnabled(String feature) {
       return enabledFeatureNames.contains(feature);
     }
 
+    /**
+     * @return whether an action config for the blaze action with the given name is enabled.
+     */
+    boolean actionIsConfigured(String actionName) {
+      return actionConfigByActionName.containsKey(actionName);
+    }
+    
     /**
      * @return the command line for the given {@code action}.
      */
@@ -877,112 +1079,180 @@ public class CcToolchainFeatures implements Serializable {
       }
       return envBuilder.build();
     }
+  
+    /**
+     * Returns a given action's tool under this FeatureConfiguration.
+     */
+    Tool getToolForAction(String actionName) {
+      Preconditions.checkArgument(
+          actionConfigByActionName.containsKey(actionName),
+          "Action %s does not have an enabled configuration in the toolchain.",
+          actionName);
+      ActionConfig actionConfig = actionConfigByActionName.get(actionName);
+      return actionConfig.getTool(enabledFeatureNames);
+    }
   }
   
   /**
-   * All features in the order in which they were specified in the configuration.
+   * All features and action configs in the order in which they were specified in the configuration.
    *
    * <p>We guarantee the command line to be in the order in which the flags were specified in the
    * configuration.
    */
-  private final ImmutableList<Feature> features;
-  
+  private final ImmutableList<CrosstoolSelectable> selectables;
+
   /**
-   * Maps from the feature's name to the feature.
+   * Maps the selectables's name to the selectable.
    */
-  private final ImmutableMap<String, Feature> featuresByName;
-  
+  private final ImmutableMap<String, CrosstoolSelectable> selectablesByName;
+
   /**
-   * Maps from a feature to a set of all the features it has a direct 'implies' edge to.
+   * Maps an action's name to the ActionConfig.
    */
-  private final ImmutableMultimap<Feature, Feature> implies;
-  
+  private final ImmutableMap<String, ActionConfig> actionConfigsByActionName;
+
   /**
-   * Maps from a feature to all features that have an direct 'implies' edge to this feature. 
+   * Maps from a selectable to a set of all the selectables it has a direct 'implies' edge to.
    */
-  private final ImmutableMultimap<Feature, Feature> impliedBy;
-  
+  private final ImmutableMultimap<CrosstoolSelectable, CrosstoolSelectable> implies;
+
   /**
-   * Maps from a feature to a set of feature sets, where:
+   * Maps from a selectable to all features that have an direct 'implies' edge to this
+   * selectable.
+   */
+  private final ImmutableMultimap<CrosstoolSelectable, CrosstoolSelectable> impliedBy;
+
+  /**
+   * Maps from a selectable to a set of selecatable sets, where:
    * <ul>
-   * <li>a feature set satisfies the 'requires' condition, if all features in the feature set are
-   *     enabled</li>
-   * <li>the 'requires' condition is satisfied, if at least one of the feature sets satisfies the
-   *     'requires' condition.</li>
-   * </ul> 
+   * <li>a selectable set satisfies the 'requires' condition, if all selectables in the
+   *        selectable set are enabled</li>
+   * <li>the 'requires' condition is satisfied, if at least one of the selectable sets satisfies
+   *        the 'requires' condition.</li>
+   * </ul>
    */
-  private final ImmutableMultimap<Feature, ImmutableSet<Feature>> requires;
-  
+  private final ImmutableMultimap<CrosstoolSelectable, ImmutableSet<CrosstoolSelectable>>
+      requires;
+
   /**
-   * Maps from a feature to all features that have a requirement referencing it.
-   * 
-   * <p>This will be used to determine which features need to be re-checked after a feature was
-   * disabled.
+   * Maps from a selectable to all selectables that have a requirement referencing it.
+   *
+   * <p>This will be used to determine which selectables need to be re-checked after a selectable
+   * was disabled.
    */
-  private final ImmutableMultimap<Feature, Feature> requiredBy;
-  
+  private final ImmutableMultimap<CrosstoolSelectable, CrosstoolSelectable> requiredBy;
+ 
   /**
    * A cache of feature selection results, so we do not recalculate the feature selection for
    * all actions.
    */
   private transient LoadingCache<Collection<String>, FeatureConfiguration>
       configurationCache = buildConfigurationCache();
-  
+
   /**
    * Constructs the feature configuration from a {@code CToolchain} protocol buffer.
-   * 
+   *
    * @param toolchain the toolchain configuration as specified by the user.
    * @throws InvalidConfigurationException if the configuration has logical errors.
    */
   @VisibleForTesting
   public CcToolchainFeatures(CToolchain toolchain) throws InvalidConfigurationException {
-    // Build up the feature graph.
-    // First, we build up the map of name -> features in one pass, so that earlier features can
-    // reference later features in their configuration.
-    ImmutableList.Builder<Feature> features = ImmutableList.builder();
-    HashMap<String, Feature> featuresByName = new HashMap<>();
+    // Build up the feature/action config graph.  We refer to features/action configs as
+    // 'selectables'.
+    // First, we build up the map of name -> selectables in one pass, so that earlier selectables
+    // can reference later features in their configuration.
+    ImmutableList.Builder<CrosstoolSelectable> selectablesBuilder = ImmutableList.builder();
+    HashMap<String, CrosstoolSelectable> selectablesByName = new HashMap<>();
+
+    // Also build a map from action -> action_config, for use in tool lookups
+    ImmutableMap.Builder<String, ActionConfig> actionConfigsByActionName = ImmutableMap.builder();
+ 
     for (CToolchain.Feature toolchainFeature : toolchain.getFeatureList()) {
       Feature feature = new Feature(toolchainFeature);
-      features.add(feature);
-      if (featuresByName.put(feature.getName(), feature) != null) {
-        throw new InvalidConfigurationException("Invalid toolchain configuration: feature '"
-            + feature.getName() + "' was specified multiple times.");
-      }
+      selectablesBuilder.add(feature);
+      selectablesByName.put(feature.getName(), feature);
     }
-    this.features = features.build();
-    this.featuresByName = ImmutableMap.copyOf(featuresByName);
     
+    for (CToolchain.ActionConfig toolchainActionConfig : toolchain.getActionConfigList()) {
+      ActionConfig actionConfig = new ActionConfig(toolchainActionConfig);
+      selectablesBuilder.add(actionConfig);
+      selectablesByName.put(actionConfig.getName(), actionConfig);
+      actionConfigsByActionName.put(actionConfig.getActionName(), actionConfig);
+    }
+
+    this.selectables = selectablesBuilder.build();
+    this.selectablesByName = ImmutableMap.copyOf(selectablesByName);
+
+    checkForActionNameDups(toolchain.getActionConfigList());
+    checkForActivatableDups(this.selectables);
+
+    this.actionConfigsByActionName = actionConfigsByActionName.build();
+
     // Next, we build up all forward references for 'implies' and 'requires' edges.
-    ImmutableMultimap.Builder<Feature, Feature> implies = ImmutableMultimap.builder();
-    ImmutableMultimap.Builder<Feature, ImmutableSet<Feature>> requires =
+    ImmutableMultimap.Builder<CrosstoolSelectable, CrosstoolSelectable> implies =
         ImmutableMultimap.builder();
-    // We also store the reverse 'implied by' and 'required by' edges during this pass. 
-    ImmutableMultimap.Builder<Feature, Feature> impliedBy = ImmutableMultimap.builder();
-    ImmutableMultimap.Builder<Feature, Feature> requiredBy = ImmutableMultimap.builder();
+    ImmutableMultimap.Builder<CrosstoolSelectable, ImmutableSet<CrosstoolSelectable>> requires =
+        ImmutableMultimap.builder();
+    // We also store the reverse 'implied by' and 'required by' edges during this pass.
+    ImmutableMultimap.Builder<CrosstoolSelectable, CrosstoolSelectable> impliedBy =
+        ImmutableMultimap.builder();
+    ImmutableMultimap.Builder<CrosstoolSelectable, CrosstoolSelectable> requiredBy =
+        ImmutableMultimap.builder();
+    
     for (CToolchain.Feature toolchainFeature : toolchain.getFeatureList()) {
       String name = toolchainFeature.getName();
-      Feature feature = featuresByName.get(name);
+      CrosstoolSelectable selectable = selectablesByName.get(name);
       for (CToolchain.FeatureSet requiredFeatures : toolchainFeature.getRequiresList()) {
-        ImmutableSet.Builder<Feature> allOf = ImmutableSet.builder(); 
+        ImmutableSet.Builder<CrosstoolSelectable> allOf = ImmutableSet.builder();
         for (String requiredName : requiredFeatures.getFeatureList()) {
-          Feature required = getFeatureOrFail(requiredName, name);
+          CrosstoolSelectable required = getActivatableOrFail(requiredName, name);
           allOf.add(required);
-          requiredBy.put(required, feature);
+          requiredBy.put(required, selectable);
         }
-        requires.put(feature, allOf.build());
+        requires.put(selectable, allOf.build());
       }
       for (String impliedName : toolchainFeature.getImpliesList()) {
-        Feature implied = getFeatureOrFail(impliedName, name);
-        impliedBy.put(implied, feature);
-        implies.put(feature, implied);
+        CrosstoolSelectable implied = getActivatableOrFail(impliedName, name);
+        impliedBy.put(implied, selectable);
+        implies.put(selectable, implied);
       }
     }
+    
+    
     this.implies = implies.build();
     this.requires = requires.build();
     this.impliedBy = impliedBy.build();
     this.requiredBy = requiredBy.build();
   }
-  
+
+  private static void checkForActivatableDups(Iterable<CrosstoolSelectable> selectables)
+      throws InvalidConfigurationException {
+    Collection<String> names = new HashSet<>();
+    for (CrosstoolSelectable selectable : selectables) {
+      if (!names.add(selectable.getName())) {
+        throw new InvalidConfigurationException(
+            "Invalid toolcahin configuration: feature or "
+                + "action config '"
+                + selectable.getName()
+                + "' was specified multiple times.");
+      }
+    }
+  }
+
+  private static void checkForActionNameDups(Iterable<CToolchain.ActionConfig> actionConfigs)
+      throws InvalidConfigurationException {
+    Collection<String> actionNames = new HashSet<>();
+    for (CToolchain.ActionConfig actionConfig : actionConfigs) {
+      if (!actionNames.add(actionConfig.getActionName())) {
+        throw new InvalidConfigurationException(
+            "Invalid toolchain configuration: multiple action "
+                + "configs for action '"
+                + actionConfig.getActionName()
+                + "'");
+      }
+    }
+  }
+ 
   /**
    * Assign an empty cache after default-deserializing all non-transient members.
    */
@@ -1009,14 +1279,14 @@ public class CcToolchainFeatures implements Serializable {
   /**
    * Given a list of {@code requestedFeatures}, returns all features that are enabled by the
    * toolchain configuration.
-   * 
+   *
    * <p>A requested feature will not be enabled if the toolchain does not support it (which may
    * depend on other requested features).
-   * 
+   *
    * <p>Additional features will be enabled if the toolchain supports them and they are implied by
    * requested features.
    */
-  FeatureConfiguration getFeatureConfiguration(Collection<String> requestedFeatures) {
+  public FeatureConfiguration getFeatureConfiguration(Collection<String> requestedFeatures) {
     return configurationCache.getUnchecked(requestedFeatures);
   }
       
@@ -1027,31 +1297,38 @@ public class CcToolchainFeatures implements Serializable {
   }
   
   /**
-   * Convenience method taking a variadic string argument list for testing.   
-   */
+   * Given a list of {@code requestedFeatures}, returns all features that are enabled by the
+   * toolchain configuration.
+   *
+   * <p>A requested feature will not be enabled if the toolchain does not support it (which may
+   * depend on other requested features).
+   *
+   * <p>Additional features will be enabled if the toolchain supports them and they are implied by
+   * requested features.
+   */ 
   public FeatureConfiguration getFeatureConfiguration(String... requestedFeatures) {
     return getFeatureConfiguration(Arrays.asList(requestedFeatures));
   }
 
   /**
-   * @return the feature with the given {@code name}.
-   * 
-   * @throws InvalidConfigurationException if no feature with the given name was configured.
+   * @return the selectable with the given {@code name}.
+   *
+   * @throws InvalidConfigurationException if no selectable with the given name was configured.
    */
-  private Feature getFeatureOrFail(String name, String reference)
+  private CrosstoolSelectable getActivatableOrFail(String name, String reference)
       throws InvalidConfigurationException {
-    if (!featuresByName.containsKey(name)) {
+    if (!selectablesByName.containsKey(name)) {
       throw new InvalidConfigurationException("Invalid toolchain configuration: feature '" + name
           + "', which is referenced from feature '" + reference + "', is not defined.");
     }
-    return featuresByName.get(name);
+    return selectablesByName.get(name);
   }
   
   @VisibleForTesting
-  Collection<String> getFeatureNames() {
+  Collection<String> getActivatableNames() {
     Collection<String> featureNames = new HashSet<>();
-    for (Feature feature : features) {
-      featureNames.add(feature.getName());
+    for (CrosstoolSelectable selectable : selectables) {
+      featureNames.add(selectable.getName());
     }
     return featureNames;
   }
@@ -1071,49 +1348,62 @@ public class CcToolchainFeatures implements Serializable {
     private final ImmutableSet<Feature> requestedFeatures;
     
     /**
-     * The currently enabled feature; during feature selection, we first put all features reachable
-     * via an 'implies' edge into the enabled feature set, and than prune that set from features
-     * that have unmet requirements.
+     * The currently enabled selectable; during feature selection, we first put all features
+     * reachable via an 'implies' edge into the enabled feature set, and than prune that set
+     * from features that have unmet requirements.
      */
-    private Set<Feature> enabled = new HashSet<>();
+    private final Set<CrosstoolSelectable> enabled = new HashSet<>();
     
     private FeatureSelection(Collection<String> requestedFeatures) {
       ImmutableSet.Builder<Feature> builder = ImmutableSet.builder();
       for (String name : requestedFeatures) {
-        if (featuresByName.containsKey(name)) {
-          builder.add(featuresByName.get(name));
+        if (selectablesByName.containsKey(name)) {
+          if (selectablesByName.get(name) instanceof Feature) {
+            builder.add((Feature) selectablesByName.get(name));
+          }
         }
       }
       this.requestedFeatures = builder.build();
     }
 
     /**
-     * @return all enabled features in the order in which they were specified in the configuration.
+     * @return a {@code FeatureConfiguration} that reflects the set of activated features and
+     * action configs.
      */
     private FeatureConfiguration run() {
       for (Feature feature : requestedFeatures) {
         enableAllImpliedBy(feature);
       }
-      disableUnsupportedFeatures();
-      ImmutableList.Builder<Feature> enabledFeaturesInOrder = ImmutableList.builder(); 
-      for (Feature feature : features) {
-        if (enabled.contains(feature)) {
-          enabledFeaturesInOrder.add(feature);
+      disableUnsupportedActivatables();
+      ImmutableList.Builder<CrosstoolSelectable> enabledActivatablesInOrderBuilder =
+          ImmutableList.builder();
+      for (CrosstoolSelectable selectable : selectables) {
+        if (enabled.contains(selectable)) {
+          enabledActivatablesInOrderBuilder.add(selectable);
         }
       }
-      return new FeatureConfiguration(enabledFeaturesInOrder.build());
+      
+      ImmutableList<CrosstoolSelectable> enabledActivatablesInOrder =
+          enabledActivatablesInOrderBuilder.build();
+      Iterable<Feature> enabledFeaturesInOrder =
+          Iterables.filter(enabledActivatablesInOrder, Feature.class);
+      Iterable<ActionConfig> enabledActionConfigsInOrder =
+          Iterables.filter(enabledActivatablesInOrder, ActionConfig.class);
+
+      return new FeatureConfiguration(
+          enabledFeaturesInOrder, enabledActionConfigsInOrder, actionConfigsByActionName);
     }
     
     /**
-     * Transitively and unconditionally enable all features implied by the given feature and the
-     * feature itself to the enabled feature set.
+     * Transitively and unconditionally enable all selectables implied by the given selectable
+     * and the selectable itself to the enabled selectable set.
      */
-    private void enableAllImpliedBy(Feature feature) {
-      if (enabled.contains(feature)) {
+    private void enableAllImpliedBy(CrosstoolSelectable selectable) {
+      if (enabled.contains(selectable)) {
         return;
       }
-      enabled.add(feature);
-      for (Feature implied : implies.get(feature)) {
+      enabled.add(selectable);
+      for (CrosstoolSelectable implied : implies.get(selectable)) {
         enableAllImpliedBy(implied);
       }
     }
@@ -1121,40 +1411,41 @@ public class CcToolchainFeatures implements Serializable {
     /**
      * Remove all unsupported features from the enabled feature set.
      */
-    private void disableUnsupportedFeatures() {
-      Queue<Feature> check = new ArrayDeque<>(enabled);
+    private void disableUnsupportedActivatables() {
+      Queue<CrosstoolSelectable> check = new ArrayDeque<>(enabled);
       while (!check.isEmpty()) {
-        checkFeature(check.poll());
+        checkActivatable(check.poll());
       }
     }
     
     /**
-     * Check if the given feature is still satisfied within the set of currently enabled features.
-     * 
-     * <p>If it is not, remove the feature from the set of enabled features, and re-check all
-     * features that may now also become disabled.
+     * Check if the given selectable is still satisfied within the set of currently enabled
+     * selectables.
+     *
+     * <p>If it is not, remove the selectable from the set of enabled selectables, and re-check
+     * all selectables that may now also become disabled.
      */
-    private void checkFeature(Feature feature) {
-      if (!enabled.contains(feature) || isSatisfied(feature)) {
+    private void checkActivatable(CrosstoolSelectable selectable) {
+      if (!enabled.contains(selectable) || isSatisfied(selectable)) {
         return;
       }
-      enabled.remove(feature);
-      
-      // Once we disable a feature, we have to re-check all features that can be affected by
-      // that removal.
-      // 1. A feature that implied the current feature is now going to be disabled.
-      for (Feature impliesCurrent : impliedBy.get(feature)) {
-        checkFeature(impliesCurrent);
+      enabled.remove(selectable);
+
+      // Once we disable a selectable, we have to re-check all selectables that can be affected
+      // by that removal.
+      // 1. A selectable that implied the current selectable is now going to be disabled.
+      for (CrosstoolSelectable impliesCurrent : impliedBy.get(selectable)) {
+        checkActivatable(impliesCurrent);
       }
-      // 2. A feature that required the current feature may now be disabled, depending on whether
-      //    the requirement was optional.
-      for (Feature requiresCurrent : requiredBy.get(feature)) {
-        checkFeature(requiresCurrent);
+      // 2. A selectable that required the current selectable may now be disabled, depending on
+      // whether the requirement was optional.
+      for (CrosstoolSelectable requiresCurrent : requiredBy.get(selectable)) {
+        checkActivatable(requiresCurrent);
       }
-      // 3. A feature that this feature implied may now be disabled if no other feature also implies
-      //    it.
-      for (Feature implied : implies.get(feature)) {
-        checkFeature(implied);
+      // 3. A selectable that this selectable implied may now be disabled if no other selectables
+      // also implies it.
+      for (CrosstoolSelectable implied : implies.get(selectable)) {
+        checkActivatable(implied);
       }
     }
 
@@ -1162,23 +1453,24 @@ public class CcToolchainFeatures implements Serializable {
      * @return whether all requirements of the feature are met in the set of currently enabled
      * features.
      */
-    private boolean isSatisfied(Feature feature) {
-      return (requestedFeatures.contains(feature) || isImpliedByEnabledFeature(feature))
-          && allImplicationsEnabled(feature) && allRequirementsMet(feature);
+    private boolean isSatisfied(CrosstoolSelectable selectable) {
+      return (requestedFeatures.contains(selectable) || isImpliedByEnabledActivatable(selectable))
+          && allImplicationsEnabled(selectable)
+          && allRequirementsMet(selectable);
     }
     
     /**
      * @return whether a currently enabled feature implies the given feature.
      */
-    private boolean isImpliedByEnabledFeature(Feature feature) {
-      return !Collections.disjoint(impliedBy.get(feature), enabled);
+    private boolean isImpliedByEnabledActivatable(CrosstoolSelectable selectable) {
+      return !Collections.disjoint(impliedBy.get(selectable), enabled);
     }
         
     /**
      * @return whether all implications of the given feature are enabled.
      */
-    private boolean allImplicationsEnabled(Feature feature) {
-      for (Feature implied : implies.get(feature)) {
+    private boolean allImplicationsEnabled(CrosstoolSelectable selectable) {
+      for (CrosstoolSelectable implied : implies.get(selectable)) {
         if (!enabled.contains(implied)) {
           return false;
         }
@@ -1188,16 +1480,17 @@ public class CcToolchainFeatures implements Serializable {
     
     /**
      * @return whether all requirements are enabled.
-     * 
-     * <p>This implies that for any of the feature sets all of the specified features are enabled.
+     *
+     * <p>This implies that for any of the selectable sets all of the specified selectable
+     *   are enabled.
      */
-    private boolean allRequirementsMet(Feature feature) {
+    private boolean allRequirementsMet(CrosstoolSelectable feature) {
       if (!requires.containsKey(feature)) {
         return true;
       }
-      for (ImmutableSet<Feature> requiresAllOf : requires.get(feature)) {
+      for (ImmutableSet<CrosstoolSelectable> requiresAllOf : requires.get(feature)) {
         boolean requirementMet = true;
-        for (Feature required : requiresAllOf) {
+        for (CrosstoolSelectable required : requiresAllOf) {
           if (!enabled.contains(required)) {
             requirementMet = false;
             break;

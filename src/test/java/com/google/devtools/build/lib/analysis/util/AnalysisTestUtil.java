@@ -20,8 +20,10 @@ import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.ImmutableSortedSet;
 import com.google.common.collect.Iterables;
 import com.google.devtools.build.lib.actions.Action;
+import com.google.devtools.build.lib.actions.ActionAnalysisMetadata;
 import com.google.devtools.build.lib.actions.ActionExecutionContext;
 import com.google.devtools.build.lib.actions.ActionExecutionException;
+import com.google.devtools.build.lib.actions.ActionOwner;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.ArtifactFactory;
 import com.google.devtools.build.lib.actions.ArtifactOwner;
@@ -35,7 +37,6 @@ import com.google.devtools.build.lib.actions.Root;
 import com.google.devtools.build.lib.actions.util.ActionsTestUtil;
 import com.google.devtools.build.lib.analysis.AnalysisEnvironment;
 import com.google.devtools.build.lib.analysis.BlazeDirectories;
-import com.google.devtools.build.lib.analysis.BuildInfoHelper;
 import com.google.devtools.build.lib.analysis.OutputGroupProvider;
 import com.google.devtools.build.lib.analysis.RuleContext;
 import com.google.devtools.build.lib.analysis.TopLevelArtifactContext;
@@ -44,6 +45,7 @@ import com.google.devtools.build.lib.analysis.WorkspaceStatusAction.Key;
 import com.google.devtools.build.lib.analysis.buildinfo.BuildInfoFactory.BuildInfoKey;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
 import com.google.devtools.build.lib.analysis.config.BuildConfigurationCollection;
+import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.events.EventHandler;
 import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.PathFragment;
@@ -76,7 +78,7 @@ public final class AnalysisTestUtil {
    * An {@link AnalysisEnvironment} implementation that collects the actions registered.
    */
   public static class CollectingAnalysisEnvironment implements AnalysisEnvironment {
-    private final List<Action> actions = new ArrayList<>();
+    private final List<ActionAnalysisMetadata> actions = new ArrayList<>();
     private final AnalysisEnvironment original;
 
     public CollectingAnalysisEnvironment(AnalysisEnvironment original) {
@@ -88,14 +90,14 @@ public final class AnalysisTestUtil {
     }
 
     @Override
-    public void registerAction(Action... actions) {
+    public void registerAction(ActionAnalysisMetadata... actions) {
       Collections.addAll(this.actions, actions);
       original.registerAction(actions);
     }
 
     /** Calls {@link MutableActionGraph#registerAction} for all collected actions. */
     public void registerWith(MutableActionGraph actionGraph) {
-      for (Action action : actions) {
+      for (ActionAnalysisMetadata action : actions) {
         try {
           actionGraph.registerAction(action);
         } catch (ActionConflictException e) {
@@ -145,12 +147,12 @@ public final class AnalysisTestUtil {
     }
 
     @Override
-    public Action getLocalGeneratingAction(Artifact artifact) {
+    public ActionAnalysisMetadata getLocalGeneratingAction(Artifact artifact) {
       return original.getLocalGeneratingAction(artifact);
     }
 
     @Override
-    public Iterable<Action> getRegisteredActions() {
+    public Iterable<ActionAnalysisMetadata> getRegisteredActions() {
       return original.getRegisteredActions();
     }
 
@@ -185,7 +187,8 @@ public final class AnalysisTestUtil {
     }
   }
 
-  public static class DummyWorkspaceStatusAction extends WorkspaceStatusAction {
+  @Immutable
+  public static final class DummyWorkspaceStatusAction extends WorkspaceStatusAction {
     private final String key;
     private final Artifact stableStatus;
     private final Artifact volatileStatus;
@@ -193,7 +196,7 @@ public final class AnalysisTestUtil {
     public DummyWorkspaceStatusAction(String key,
         Artifact stableStatus, Artifact volatileStatus) {
       super(
-          BuildInfoHelper.BUILD_INFO_ACTION_OWNER,
+          ActionOwner.SYSTEM_ACTION_OWNER,
           ImmutableList.<Artifact>of(),
           ImmutableList.of(stableStatus, volatileStatus));
       this.key = key;
@@ -299,7 +302,7 @@ public final class AnalysisTestUtil {
 
   public static class StubAnalysisEnvironment implements AnalysisEnvironment {
     @Override
-    public void registerAction(Action... action) {
+    public void registerAction(ActionAnalysisMetadata... action) {
     }
 
     @Override
@@ -338,7 +341,7 @@ public final class AnalysisTestUtil {
     }
 
     @Override
-    public Iterable<Action> getRegisteredActions() {
+    public Iterable<ActionAnalysisMetadata> getRegisteredActions() {
       return ImmutableList.of();
     }
 

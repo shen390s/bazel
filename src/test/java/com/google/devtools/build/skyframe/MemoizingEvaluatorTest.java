@@ -88,7 +88,6 @@ public class MemoizingEvaluatorTest {
   private EventCollector eventCollector;
   private EventHandler reporter;
   protected MemoizingEvaluator.EmittedEventState emittedEventState;
-  @Nullable NotifyingInMemoryGraph graph = null;
 
   // Knobs that control the size / duration of larger tests.
   private static final int TEST_NODE_COUNT = 100;
@@ -98,17 +97,15 @@ public class MemoizingEvaluatorTest {
   @Before
   public void initializeTester() {
     initializeTester(null);
+    initializeReporter();
   }
 
   @After
   public void assertNoTrackedErrors() {
     TrackingAwaiter.INSTANCE.assertNoErrors();
-    if (graph != null) {
-      graph.assertNoExceptions();
-    }
   }
 
-  public void initializeTester(@Nullable TrackingInvalidationReceiver customInvalidationReceiver) {
+  private void initializeTester(@Nullable TrackingInvalidationReceiver customInvalidationReceiver) {
     emittedEventState = new MemoizingEvaluator.EmittedEventState();
     tester = new MemoizingEvaluatorTester();
     if (customInvalidationReceiver != null) {
@@ -137,15 +134,14 @@ public class MemoizingEvaluatorTest {
     return true;
   }
 
-  @Before
-  public void initializeReporter() {
+  private void initializeReporter() {
     eventCollector = new EventCollector();
     reporter = eventCollector;
     tester.resetPlayedEvents();
   }
 
-  protected static SkyKey toSkyKey(String name) {
-    return new SkyKey(NODE_TYPE, name);
+  private static SkyKey toSkyKey(String name) {
+    return SkyKey.create(NODE_TYPE, name);
   }
 
   @Test
@@ -217,6 +213,33 @@ public class MemoizingEvaluatorTest {
     assertTrue(result.hasError());
     assertEquals(toSkyKey("badValue"), Iterables.getOnlyElement(result.getError().getRootCauses()));
     assertThat(result.keyNames()).isEmpty();
+  }
+
+  @Test
+  public void cachedErrorShutsDownThreadpool() throws Exception {
+    // When a node throws an error on the first build,
+    SkyKey cachedErrorKey = GraphTester.skyKey("error");
+    tester.getOrCreate(cachedErrorKey).setHasError(true);
+    assertThat(tester.evalAndGetError(cachedErrorKey)).isNotNull();
+    // And on the second build, it is requested as a dep,
+    SkyKey topKey = GraphTester.skyKey("top");
+    tester.getOrCreate(topKey).addDependency(cachedErrorKey).setComputedValue(CONCATENATE);
+    // And another node throws an error, but waits to throw until the child error is thrown,
+    SkyKey newErrorKey = GraphTester.skyKey("newError");
+    tester
+        .getOrCreate(newErrorKey)
+        .setBuilder(
+            new ChainedFunction.Builder()
+                .setWaitForException(true)
+                .setWaitToFinish(new CountDownLatch(0))
+                .setValue(null)
+                .build());
+    // Then when evaluation happens,
+    EvaluationResult<StringValue> result = tester.eval(/*keepGoing=*/ false, newErrorKey, topKey);
+    // The result has an error,
+    assertThatEvaluationResult(result).hasError();
+    // But the new error is not persisted to the graph, since the child error shut down evaluation.
+    assertThatEvaluationResult(result).hasErrorEntryForKeyThat(newErrorKey).isNull();
   }
 
   @Test
@@ -882,6 +905,24 @@ public class MemoizingEvaluatorTest {
     cycleInfo = Iterables.getOnlyElement(errorInfo.getCycleInfo());
     assertThat(cycleInfo.getCycle()).containsExactly(aKey, bKey).inOrder();
     assertThat(cycleInfo.getPathToCycle()).containsExactly(topKey, midKey).inOrder();
+  }
+
+  @Test
+  public void keepGoingCycleAlreadyPresent() throws Exception {
+    SkyKey selfEdge = GraphTester.toSkyKey("selfEdge");
+    tester.getOrCreate(selfEdge).addDependency(selfEdge).setComputedValue(CONCATENATE);
+    EvaluationResult<StringValue> result = tester.eval(/*keepGoing=*/ true, selfEdge);
+    assertThatEvaluationResult(result).hasError();
+    CycleInfo cycleInfo = Iterables.getOnlyElement(result.getError(selfEdge).getCycleInfo());
+    CycleInfoSubjectFactory.assertThat(cycleInfo).hasCycleThat().containsExactly(selfEdge);
+    CycleInfoSubjectFactory.assertThat(cycleInfo).hasPathToCycleThat().isEmpty();
+    SkyKey parent = GraphTester.toSkyKey("parent");
+    tester.getOrCreate(parent).addDependency(selfEdge).setComputedValue(CONCATENATE);
+    EvaluationResult<StringValue> result2 = tester.eval(/*keepGoing=*/ true, parent);
+    assertThatEvaluationResult(result).hasError();
+    CycleInfo cycleInfo2 = Iterables.getOnlyElement(result2.getError(parent).getCycleInfo());
+    CycleInfoSubjectFactory.assertThat(cycleInfo2).hasCycleThat().containsExactly(selfEdge);
+    CycleInfoSubjectFactory.assertThat(cycleInfo2).hasPathToCycleThat().containsExactly(parent);
   }
 
   private void changeCycle(boolean keepGoing) throws Exception {
@@ -3853,7 +3894,6 @@ public class MemoizingEvaluatorTest {
   }
 
   private void setGraphForTesting(NotifyingInMemoryGraph notifyingInMemoryGraph) {
-    graph = notifyingInMemoryGraph;
     InMemoryMemoizingEvaluator memoizingEvaluator = (InMemoryMemoizingEvaluator) tester.evaluator;
     memoizingEvaluator.setGraphForTesting(notifyingInMemoryGraph);
   }
@@ -4047,13 +4087,12 @@ public class MemoizingEvaluatorTest {
 
   /** A graph tester that is specific to the memoizing evaluator, with some convenience methods. */
   protected class MemoizingEvaluatorTester extends GraphTester {
-    private RecordingDifferencer differencer;
+    private RecordingDifferencer differencer = new RecordingDifferencer();
     private MemoizingEvaluator evaluator;
     private BuildDriver driver;
     private TrackingInvalidationReceiver invalidationReceiver = new TrackingInvalidationReceiver();
 
     public void initialize() {
-      this.differencer = new RecordingDifferencer();
       this.evaluator =
           getMemoizingEvaluator(getSkyFunctionMap(), differencer, invalidationReceiver);
       this.driver = getBuildDriver(evaluator);

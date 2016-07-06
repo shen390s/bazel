@@ -14,9 +14,11 @@
 package com.google.devtools.build.lib.rules.java;
 
 import com.google.devtools.build.lib.actions.Artifact;
+import com.google.devtools.build.lib.analysis.AnalysisUtils;
 import com.google.devtools.build.lib.analysis.RuleConfiguredTarget.Mode;
 import com.google.devtools.build.lib.analysis.RuleContext;
 import com.google.devtools.build.lib.analysis.TransitiveInfoCollection;
+import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.packages.BuildType;
 import com.google.devtools.build.lib.shell.ShellUtils;
 import com.google.devtools.build.lib.syntax.Type;
@@ -58,11 +60,16 @@ public abstract class JavaHelper {
    * or --java_launcher flag.
    */
   private static String filterLauncherForTarget(JavaSemantics semantics, RuleContext ruleContext) {
+    // create_executable=0 disables the launcher
+    if (ruleContext.getRule().isAttrDefined("create_executable", Type.BOOLEAN)
+        && !ruleContext.attributes().get("create_executable", Type.BOOLEAN)) {
+      return null;
+    }
     // BUILD rule "launcher" attribute
     if (ruleContext.getRule().isAttrDefined("launcher", BuildType.LABEL)
         && ruleContext.attributes().get("launcher", BuildType.LABEL) != null) {
       if (ruleContext.attributes().get("launcher", BuildType.LABEL)
-          .equals(JavaSemantics.JDK_LAUNCHER_LABEL)) {
+          .equals(semantics.getJdkLauncherLabel())) {
         return null;
       }
       return "launcher";
@@ -71,7 +78,7 @@ public abstract class JavaHelper {
     JavaConfiguration javaConfig = ruleContext.getFragment(JavaConfiguration.class);
     if (ruleContext.getRule().isAttrDefined(":java_launcher", BuildType.LABEL)
         && ((javaConfig.getJavaLauncherLabel() != null
-                && !javaConfig.getJavaLauncherLabel().equals(JavaSemantics.JDK_LAUNCHER_LABEL))
+                && !javaConfig.getJavaLauncherLabel().equals(semantics.getJdkLauncherLabel()))
             || semantics.forceUseJavaLauncherTarget(ruleContext))) {
       return ":java_launcher";
     }
@@ -107,6 +114,12 @@ public abstract class JavaHelper {
   public static PathFragment getJavaResourcePath(
       JavaSemantics semantics, RuleContext ruleContext, Artifact resource) {
     PathFragment rootRelativePath = resource.getRootRelativePath();
+
+    if (!resource.getOwner().getWorkspaceRoot().isEmpty()) {
+      PathFragment workspace = new PathFragment(resource.getOwner().getWorkspaceRoot());
+      rootRelativePath = rootRelativePath.relativeTo(workspace);
+    }
+
     if (!ruleContext.attributes().has("resource_strip_prefix", Type.STRING)
         || !ruleContext.attributes().isAttributeValueExplicitlySpecified("resource_strip_prefix")) {
       return semantics.getDefaultJavaResourcePath(rootRelativePath);
@@ -122,5 +135,13 @@ public abstract class JavaHelper {
     }
 
     return rootRelativePath.relativeTo(prefix);
+  }
+
+  /**
+   * Returns the artifacts required to invoke {@code javahome} relative binary
+   * in the action.
+   */
+  public static NestedSet<Artifact> getHostJavabaseInputs(RuleContext ruleContext) {
+    return AnalysisUtils.getMiddlemanFor(ruleContext, ":host_jdk");
   }
 }

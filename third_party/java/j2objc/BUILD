@@ -28,7 +28,14 @@ filegroup(
 
 java_library(
     name = "annotations",
-    srcs = ["@bazel-j2objc//:annotations"],
+    exports = ["@bazel_j2objc//:annotations"],
+)
+
+genrule(
+    name = "jre_emul_jar",
+    srcs = ["@bazel_j2objc//:jre_emul.jar"],
+    outs = ["jre_emul.jar"],
+    cmd = "cp $< $@",
 )
 
 objc_library(
@@ -41,11 +48,4 @@ objc_library(
         "Security",
     ],
     deps = ["@bazel_j2objc//:jre_emul_archive"],
-)
-
-# Proto support is a work in progress.
-# We put an empty filegroup here so Bazel analysis doesn't fail.
-filegroup(
-    name = "proto_runtime",
-    srcs = [],
 )

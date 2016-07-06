@@ -19,6 +19,7 @@ import com.google.common.collect.ImmutableSortedSet;
 import com.google.common.collect.Iterables;
 import com.google.common.eventbus.EventBus;
 import com.google.devtools.build.lib.actions.Action;
+import com.google.devtools.build.lib.actions.ActionAnalysisMetadata;
 import com.google.devtools.build.lib.actions.ActionGraph;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.analysis.BlazeDirectories;
@@ -27,6 +28,7 @@ import com.google.devtools.build.lib.analysis.BuildView.AnalysisResult;
 import com.google.devtools.build.lib.analysis.ConfiguredRuleClassProvider;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
 import com.google.devtools.build.lib.analysis.InputFileConfiguredTarget;
+import com.google.devtools.build.lib.analysis.RuleDefinition;
 import com.google.devtools.build.lib.analysis.config.BinTools;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
 import com.google.devtools.build.lib.analysis.config.BuildConfigurationCollection;
@@ -36,6 +38,7 @@ import com.google.devtools.build.lib.buildtool.BuildRequest.BuildRequestOptions;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.cmdline.LabelSyntaxException;
 import com.google.devtools.build.lib.exec.ExecutionOptions;
+import com.google.devtools.build.lib.flags.InvocationPolicyEnforcer;
 import com.google.devtools.build.lib.packages.PackageFactory;
 import com.google.devtools.build.lib.packages.Preprocessor;
 import com.google.devtools.build.lib.packages.Target;
@@ -158,7 +161,6 @@ public abstract class AnalysisTestCase extends FoundationTestCase {
     skyframeExecutor =
         SequencedSkyframeExecutor.create(
             pkgFactory,
-            new TimestampGranularityMonitor(BlazeClock.instance()),
             directories,
             binTools,
             workspaceStatusActionFactory,
@@ -166,17 +168,27 @@ public abstract class AnalysisTestCase extends FoundationTestCase {
             ImmutableList.<DiffAwareness.Factory>of(),
             Predicates.<PathFragment>alwaysFalse(),
             Preprocessor.Factory.Supplier.NullSupplier.INSTANCE,
-            analysisMock.getSkyFunctions(directories),
+            analysisMock.getSkyFunctions(),
             getPrecomputedValues(),
             ImmutableList.<SkyValueDirtinessChecker>of());
-    skyframeExecutor.preparePackageLoading(pkgLocator,
-        Options.getDefaults(PackageCacheOptions.class).defaultVisibility, true,
-        3, ruleClassProvider.getDefaultsPackageContent(), UUID.randomUUID());
+    skyframeExecutor.preparePackageLoading(
+        pkgLocator,
+        Options.getDefaults(PackageCacheOptions.class).defaultVisibility,
+        true,
+        3,
+        ruleClassProvider.getDefaultsPackageContent(TestConstants.TEST_INVOCATION_POLICY),
+        UUID.randomUUID(),
+        new TimestampGranularityMonitor(BlazeClock.instance()));
     packageManager = skyframeExecutor.getPackageManager();
     loadingPhaseRunner = skyframeExecutor.getLoadingPhaseRunner(
         pkgFactory.getRuleClassNames(), defaultFlags().contains(Flag.SKYFRAME_LOADING_PHASE));
     buildView = new BuildView(directories, ruleClassProvider, skyframeExecutor, null);
     useConfiguration();
+  }
+
+  /** To be overriden by sub classes if they want to disable loading. */
+  protected boolean isLoadingEnabled() {
+    return true;
   }
 
   protected ImmutableList<PrecomputedValue.Injected> getPrecomputedValues() {
@@ -200,6 +212,10 @@ public abstract class AnalysisTestCase extends FoundationTestCase {
         ruleClassProvider.getConfigurationOptions()));
     optionsParser.parse(new String[] {"--default_visibility=public" });
     optionsParser.parse(args);
+
+    InvocationPolicyEnforcer optionsPolicyEnforcer =
+        new InvocationPolicyEnforcer(TestConstants.TEST_INVOCATION_POLICY);
+    optionsPolicyEnforcer.enforce(optionsParser);
   }
 
   protected FlagBuilder defaultFlags() {
@@ -208,7 +224,17 @@ public abstract class AnalysisTestCase extends FoundationTestCase {
 
   protected Action getGeneratingAction(Artifact artifact) {
     ensureUpdateWasCalled();
-    return analysisResult.getActionGraph().getGeneratingAction(artifact);
+    ActionAnalysisMetadata action = analysisResult.getActionGraph().getGeneratingAction(artifact);
+
+    if (action != null) {
+      Preconditions.checkState(
+          action instanceof Action,
+          "%s is not a proper Action object",
+          action.prettyPrint());
+      return (Action) action;
+    } else {
+      return null;
+    }
   }
 
   protected BuildConfigurationCollection getBuildConfigurationCollection() {
@@ -246,9 +272,14 @@ public abstract class AnalysisTestCase extends FoundationTestCase {
 
     PathPackageLocator pathPackageLocator = PathPackageLocator.create(
         outputBase, packageCacheOptions.packagePath, reporter, rootDirectory, rootDirectory);
-    skyframeExecutor.preparePackageLoading(pathPackageLocator,
-        packageCacheOptions.defaultVisibility, true,
-        7, ruleClassProvider.getDefaultsPackageContent(), UUID.randomUUID());
+    skyframeExecutor.preparePackageLoading(
+        pathPackageLocator,
+        packageCacheOptions.defaultVisibility,
+        true,
+        7,
+        ruleClassProvider.getDefaultsPackageContent(TestConstants.TEST_INVOCATION_POLICY),
+        UUID.randomUUID(),
+        new TimestampGranularityMonitor(BlazeClock.instance()));
     skyframeExecutor.invalidateFilesUnderPathForTesting(reporter,
         ModifiedFileSet.EVERYTHING_MODIFIED, rootDirectory);
 
@@ -260,7 +291,7 @@ public abstract class AnalysisTestCase extends FoundationTestCase {
     BuildRequestOptions requestOptions = optionsParser.getOptions(BuildRequestOptions.class);
     ImmutableSortedSet<String> multiCpu = ImmutableSortedSet.copyOf(requestOptions.multiCpus);
     masterConfig = skyframeExecutor.createConfigurations(
-        reporter, configurationFactory, buildOptions, directories, multiCpu, false);
+        reporter, configurationFactory, buildOptions, multiCpu, false);
     analysisResult =
         buildView.update(
             loadingResult,
@@ -269,8 +300,7 @@ public abstract class AnalysisTestCase extends FoundationTestCase {
             viewOptions,
             AnalysisTestUtil.TOP_LEVEL_ARTIFACT_CONTEXT,
             reporter,
-            eventBus,
-            isLoadingEnabled());
+            eventBus);
     return analysisResult;
   }
 
@@ -377,4 +407,21 @@ public abstract class AnalysisTestCase extends FoundationTestCase {
   protected void clearAnalysisResult() {
     analysisResult = null;
   }
+
+  /**
+   * Makes {@code rules} available in tests, in addition to all the rules available to Blaze at 
+   * running time (e.g., java_library).
+   */
+  protected final void setRulesAvailableInTests(RuleDefinition... rules) throws Exception {
+    ConfiguredRuleClassProvider.Builder builder =
+        new ConfiguredRuleClassProvider.Builder();
+    TestRuleClassProvider.addStandardRules(builder);
+    for (RuleDefinition rule : rules) {
+      builder.addRuleDefinition(rule);
+    }
+
+    useRuleClassProvider(builder.build());
+    update();
+  }
+
 }

@@ -16,6 +16,8 @@ package com.google.devtools.build.lib.query2;
 import com.google.common.base.Function;
 import com.google.common.base.Predicate;
 import com.google.common.base.Predicates;
+import com.google.common.base.Supplier;
+import com.google.common.base.Suppliers;
 import com.google.common.collect.ArrayListMultimap;
 import com.google.common.collect.Collections2;
 import com.google.common.collect.ImmutableList;
@@ -47,11 +49,17 @@ import com.google.devtools.build.lib.pkgcache.TargetPatternEvaluator;
 import com.google.devtools.build.lib.profiler.AutoProfiler;
 import com.google.devtools.build.lib.query2.engine.AllRdepsFunction;
 import com.google.devtools.build.lib.query2.engine.Callback;
+import com.google.devtools.build.lib.query2.engine.FunctionExpression;
 import com.google.devtools.build.lib.query2.engine.QueryEvalResult;
 import com.google.devtools.build.lib.query2.engine.QueryException;
 import com.google.devtools.build.lib.query2.engine.QueryExpression;
+import com.google.devtools.build.lib.query2.engine.QueryExpressionMapper;
 import com.google.devtools.build.lib.query2.engine.QueryUtil.AbstractUniquifier;
+import com.google.devtools.build.lib.query2.engine.RdepsFunction;
+import com.google.devtools.build.lib.query2.engine.TargetLiteral;
 import com.google.devtools.build.lib.query2.engine.Uniquifier;
+import com.google.devtools.build.lib.skyframe.BlacklistedPackagePrefixesValue;
+import com.google.devtools.build.lib.skyframe.ContainingPackageLookupFunction;
 import com.google.devtools.build.lib.skyframe.FileValue;
 import com.google.devtools.build.lib.skyframe.GraphBackedRecursivePackageProvider;
 import com.google.devtools.build.lib.skyframe.PackageLookupValue;
@@ -101,9 +109,10 @@ public class SkyQueryEnvironment extends AbstractBlazeQueryEnvironment<Target> {
   // TODO(janakr): Unify with RecursivePackageProviderBackedTargetPatternResolver's constant.
   private static final int BATCH_CALLBACK_SIZE = 10000;
 
-  private WalkableGraph graph;
+  protected WalkableGraph graph;
 
   private ImmutableList<TargetPatternKey> universeTargetPatternKeys;
+  private Supplier<ImmutableSet<PathFragment>> blacklistPatternsSupplier;
 
   private final Map<String, Set<Label>> precomputedPatterns = new HashMap<>();
   private final BlazeTargetAccessor accessor = new BlazeTargetAccessor(this);
@@ -123,6 +132,21 @@ public class SkyQueryEnvironment extends AbstractBlazeQueryEnvironment<Target> {
       return target.getLabel();
     }
   };
+
+  private static class BlacklistSupplier implements Supplier<ImmutableSet<PathFragment>> {
+    private final WalkableGraph graph;
+
+    BlacklistSupplier(WalkableGraph graph) {
+      this.graph = graph;
+    }
+
+    @Override
+    public ImmutableSet<PathFragment> get() {
+      return ((BlacklistedPackagePrefixesValue)
+              graph.getValue(BlacklistedPackagePrefixesValue.key()))
+          .getPatterns();
+    }
+  }
 
   public SkyQueryEnvironment(boolean keepGoing, boolean strictScope, int loadingPhaseThreads,
       Predicate<Label> labelFilter,
@@ -152,6 +176,8 @@ public class SkyQueryEnvironment extends AbstractBlazeQueryEnvironment<Target> {
     }
     graph = result.getWalkableGraph();
 
+    blacklistPatternsSupplier = Suppliers.memoize(new BlacklistSupplier(graph));
+
     SkyKey universeKey = graphFactory.getUniverseKey(universeScope, parserPrefix);
     universeTargetPatternKeys =
         PrepareDepsOfPatternsFunction.getTargetPatternKeys(
@@ -173,6 +199,42 @@ public class SkyQueryEnvironment extends AbstractBlazeQueryEnvironment<Target> {
   }
 
   @Override
+  public QueryExpression transformParsedQuery(QueryExpression queryExpression) {
+    // Transform each occurrence of an expressions of the form 'rdeps(<universeScope>, <T>)' to
+    // 'allrdeps(<T>)'. The latter is more efficient.
+    if (universeScope.size() != 1) {
+      return queryExpression;
+    }
+    final TargetPattern.Parser targetPatternParser = new TargetPattern.Parser(parserPrefix);
+    String universeScopePattern = Iterables.getOnlyElement(universeScope);
+    final String absoluteUniverseScopePattern =
+        targetPatternParser.absolutize(universeScopePattern);
+    QueryExpressionMapper rdepsToAllRDepsMapper = new QueryExpressionMapper() {
+      @Override
+      public QueryExpression map(FunctionExpression functionExpression) {
+        if (functionExpression.getFunction().getName().equals(new RdepsFunction().getName())) {
+          List<Argument> args = functionExpression.getArgs();
+          QueryExpression universeExpression = args.get(0).getExpression();
+          if (universeExpression instanceof TargetLiteral) {
+            TargetLiteral literalUniverseExpression = (TargetLiteral) universeExpression;
+            String absolutizedUniverseExpression =
+                targetPatternParser.absolutize(literalUniverseExpression.getPattern());
+            if (absolutizedUniverseExpression.equals(absoluteUniverseScopePattern)) {
+              List<Argument> argsTail = args.subList(1, functionExpression.getArgs().size());
+              return new FunctionExpression(new AllRdepsFunction(), argsTail);
+            }
+          }
+        }
+        return super.map(functionExpression);
+      }
+    };
+    QueryExpression transformedQueryExpression = queryExpression.getMapped(rdepsToAllRDepsMapper);
+    LOG.info(String.format("transformed query [%s] to [%s]", queryExpression,
+        transformedQueryExpression));
+    return transformedQueryExpression;
+  }
+
+  @Override
   public QueryEvalResult evaluateQuery(QueryExpression expr, Callback<Target> callback)
       throws QueryException, InterruptedException {
     // Some errors are reported as QueryExceptions and others as ERROR events (if --keep_going). The
@@ -180,9 +242,7 @@ public class SkyQueryEnvironment extends AbstractBlazeQueryEnvironment<Target> {
     // errors here.
     eventHandler.resetErrors();
     init();
-    QueryEvalResult result = super.evaluateQuery(expr, callback);
-    graphFactory.afterUse(graph);
-    return result;
+    return super.evaluateQuery(expr, callback);
   }
 
   private Map<Target, Collection<Target>> makeTargetsMap(Map<SkyKey, Iterable<SkyKey>> input) {
@@ -419,9 +479,8 @@ public class SkyQueryEnvironment extends AbstractBlazeQueryEnvironment<Target> {
                 TargetPatternValue.key(
                         pattern, TargetPatternEvaluator.DEFAULT_FILTERING_POLICY, parserPrefix)
                     .argument());
-        GraphBackedRecursivePackageProvider provider =
-            new GraphBackedRecursivePackageProvider(graph, universeTargetPatternKeys, pkgPath);
-
+        GraphBackedRecursivePackageProvider provider = new GraphBackedRecursivePackageProvider(
+            graph, universeTargetPatternKeys, pkgPath);
         ExecutorService threadPool = Executors.newFixedThreadPool(
             Runtime.getRuntime().availableProcessors(),
             new ThreadFactoryBuilder().setNameFormat("GetPackages-%d").build());
@@ -429,9 +488,11 @@ public class SkyQueryEnvironment extends AbstractBlazeQueryEnvironment<Target> {
             new RecursivePackageProviderBackedTargetPatternResolver(
                 provider, eventHandler, targetPatternKey.getPolicy(), threadPool);
         TargetPattern parsedPattern = targetPatternKey.getParsedPattern();
+        ImmutableSet<PathFragment> subdirectoriesToExclude =
+            targetPatternKey.getAllSubdirectoriesToExclude(blacklistPatternsSupplier.get());
         FilteringBatchingUniquifyingCallback wrapper =
             new FilteringBatchingUniquifyingCallback(callback);
-        parsedPattern.eval(resolver, wrapper, QueryException.class);
+        parsedPattern.eval(resolver, subdirectoriesToExclude, wrapper, QueryException.class);
         wrapper.processLastPending();
       } catch (TargetParsingException e) {
         reportBuildFileError(owner, e.getMessage());
@@ -719,9 +780,42 @@ public class SkyQueryEnvironment extends AbstractBlazeQueryEnvironment<Target> {
   }
 
   /**
-   * Get SkyKeys for the FileValues for the given {@code pathFragments}. To do this, we look for a
-   * package lookup node for each path fragment, since package lookup nodes contain the "root" of a
-   * package. The returned SkyKeys correspond to FileValues that may not exist in the graph.
+   * Returns package lookup keys for looking up the package root for which there may be a relevant
+   * (from the perspective of {@link #getRBuildFiles}) {@link FileValue} node in the graph for
+   * {@code originalFileFragment}, which is assumed to be a file path.
+   *
+   * <p>This is a helper function for {@link #getSkyKeysForFileFragments}.
+   */
+  private static Iterable<SkyKey> getPkgLookupKeysForFile(PathFragment originalFileFragment,
+      PathFragment currentPathFragment) {
+    if (originalFileFragment.equals(currentPathFragment)
+        && originalFileFragment.equals(Label.EXTERNAL_PACKAGE_FILE_NAME)) {
+      Preconditions.checkState(
+          Label.EXTERNAL_PACKAGE_FILE_NAME.getParentDirectory().equals(
+              PathFragment.EMPTY_FRAGMENT),
+          Label.EXTERNAL_PACKAGE_FILE_NAME);
+      return ImmutableList.of(
+          PackageLookupValue.key(Label.EXTERNAL_PACKAGE_IDENTIFIER),
+          PackageLookupValue.key(PackageIdentifier.createInMainRepo(PathFragment.EMPTY_FRAGMENT)));
+    }
+    PathFragment parentPathFragment = currentPathFragment.getParentDirectory();
+    return parentPathFragment == null
+        ? ImmutableList.<SkyKey>of()
+        : ImmutableList.of(PackageLookupValue.key(
+            PackageIdentifier.createInMainRepo(parentPathFragment)));
+  }
+
+  /**
+   * Returns FileValue keys for which there may be relevant (from the perspective of
+   * {@link #getRBuildFiles}) FileValues in the graph corresponding to the given
+   * {@code pathFragments}, which are assumed to be file paths.
+   *
+   * <p>To do this, we emulate the {@link ContainingPackageLookupFunction} logic: for each given
+   * file path, we look for the nearest ancestor directory (starting with its parent directory), if
+   * any, that has a package. The {@link PackageLookupValue} for this package tells us the package
+   * root that we should use for the {@link RootedPath} for the {@link FileValue} key.
+   * 
+   * Note that there may not be nodes in the graph corresponding to the returned SkyKeys.
    */
   private Collection<SkyKey> getSkyKeysForFileFragments(Iterable<PathFragment> pathFragments) {
     Set<SkyKey> result = new HashSet<>();
@@ -730,24 +824,32 @@ public class SkyQueryEnvironment extends AbstractBlazeQueryEnvironment<Target> {
       currentToOriginal.put(pathFragment, pathFragment);
     }
     while (!currentToOriginal.isEmpty()) {
-      Map<SkyKey, PathFragment> keys = new HashMap<>();
-      for (PathFragment pathFragment : currentToOriginal.keySet()) {
-        keys.put(
-            PackageLookupValue.key(PackageIdentifier.createInDefaultRepo(pathFragment)),
-            pathFragment);
+      Multimap<SkyKey, PathFragment> packageLookupKeysToOriginal = ArrayListMultimap.create();
+      Multimap<SkyKey, PathFragment> packageLookupKeysToCurrent = ArrayListMultimap.create();
+      for (Entry<PathFragment, PathFragment> entry : currentToOriginal.entries()) {
+        PathFragment current = entry.getKey();
+        PathFragment original = entry.getValue();
+        for (SkyKey packageLookupKey : getPkgLookupKeysForFile(original, current)) {
+          packageLookupKeysToOriginal.put(packageLookupKey, original);
+          packageLookupKeysToCurrent.put(packageLookupKey, current);
+        }
       }
-      Map<SkyKey, SkyValue> lookupValues = graph.getSuccessfulValues(keys.keySet());
+      Map<SkyKey, SkyValue> lookupValues =
+          graph.getSuccessfulValues(packageLookupKeysToOriginal.keySet());
       for (Map.Entry<SkyKey, SkyValue> entry : lookupValues.entrySet()) {
+        SkyKey packageLookupKey = entry.getKey();
         PackageLookupValue packageLookupValue = (PackageLookupValue) entry.getValue();
         if (packageLookupValue.packageExists()) {
-          PathFragment dir = keys.get(entry.getKey());
-          Collection<PathFragment> originalFiles = currentToOriginal.get(dir);
+          Collection<PathFragment> originalFiles =
+              packageLookupKeysToOriginal.get(packageLookupKey);
           Preconditions.checkState(!originalFiles.isEmpty(), entry);
           for (PathFragment fileName : originalFiles) {
             result.add(
                 FileValue.key(RootedPath.toRootedPath(packageLookupValue.getRoot(), fileName)));
           }
-          currentToOriginal.removeAll(dir);
+          for (PathFragment current : packageLookupKeysToCurrent.get(packageLookupKey)) {
+            currentToOriginal.removeAll(current);
+          }
         }
       }
       Multimap<PathFragment, PathFragment> newCurrentToOriginal = ArrayListMultimap.create();
@@ -762,12 +864,42 @@ public class SkyQueryEnvironment extends AbstractBlazeQueryEnvironment<Target> {
     return result;
   }
 
+  private static final Function<SkyValue, Package> EXTRACT_PACKAGE =
+      new Function<SkyValue, Package>() {
+        @Override
+        public Package apply(SkyValue skyValue) {
+          return ((PackageValue) skyValue).getPackage();
+        }
+      };
+
+  private static final Predicate<Package> ERROR_FREE_PACKAGE =
+      new Predicate<Package>() {
+        @Override
+        public boolean apply(Package pkg) {
+          return !pkg.containsErrors();
+        }
+      };
+
+  private static final Function<Package, Target> GET_BUILD_FILE =
+      new Function<Package, Target>() {
+        @Override
+        public Target apply(Package pkg) {
+          return pkg.getBuildFile();
+        }
+      };
+
+  private static Iterable<Target> getBuildFilesForPackageValues(Iterable<SkyValue> packageValues) {
+    return Iterables.transform(
+        Iterables.filter(Iterables.transform(packageValues, EXTRACT_PACKAGE), ERROR_FREE_PACKAGE),
+        GET_BUILD_FILE);
+  }
+
   /**
    * Calculates the set of {@link Package} objects, represented as source file targets, that depend
    * on the given list of BUILD files and subincludes (other files are filtered out).
    */
-  @Nullable
-  Set<Target> getRBuildFiles(Collection<PathFragment> fileIdentifiers) {
+  void getRBuildFiles(Collection<PathFragment> fileIdentifiers, Callback<Target> callback)
+      throws QueryException, InterruptedException {
     Collection<SkyKey> files = getSkyKeysForFileFragments(fileIdentifiers);
     Collection<SkyKey> current = graph.getSuccessfulValues(files).keySet();
     Set<SkyKey> resultKeys = CompactHashSet.create();
@@ -777,21 +909,23 @@ public class SkyQueryEnvironment extends AbstractBlazeQueryEnvironment<Target> {
       for (SkyKey rdep : Iterables.concat(reverseDeps)) {
         if (rdep.functionName().equals(SkyFunctions.PACKAGE)) {
           resultKeys.add(rdep);
+          // Every package has a dep on the external package, so we need to include those edges too.
+          if (rdep.equals(PackageValue.key(Label.EXTERNAL_PACKAGE_IDENTIFIER))) {
+            current.add(rdep);
+          }
         } else if (!rdep.functionName().equals(SkyFunctions.PACKAGE_LOOKUP)) {
-          // Packages may depend on subpackages for existence, but we don't report them as rdeps.
+          // Packages may depend on the existence of subpackages, but these edges aren't relevant to
+          // rbuildfiles.
           current.add(rdep);
         }
       }
-    }
-    Map<SkyKey, SkyValue> packageValues = graph.getSuccessfulValues(resultKeys);
-    ImmutableSet.Builder<Target> result = ImmutableSet.builder();
-    for (SkyValue value : packageValues.values()) {
-      Package pkg = ((PackageValue) value).getPackage();
-      if (!pkg.containsErrors()) {
-        result.add(pkg.getBuildFile());
+      if (resultKeys.size() >= BATCH_CALLBACK_SIZE) {
+        callback.process(
+            getBuildFilesForPackageValues(graph.getSuccessfulValues(resultKeys).values()));
+        resultKeys.clear();
       }
     }
-    return result.build();
+    callback.process(getBuildFilesForPackageValues(graph.getSuccessfulValues(resultKeys).values()));
   }
 
   @Override

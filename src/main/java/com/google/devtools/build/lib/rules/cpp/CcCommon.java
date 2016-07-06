@@ -13,11 +13,13 @@
 // limitations under the License.
 package com.google.devtools.build.lib.rules.cpp;
 
+import static com.google.devtools.build.lib.rules.cpp.CcLibraryHelper.SourceCategory;
+
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Maps;
-import com.google.devtools.build.lib.actions.Action;
+import com.google.devtools.build.lib.actions.ActionAnalysisMetadata;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.analysis.AnalysisEnvironment;
 import com.google.devtools.build.lib.analysis.FileProvider;
@@ -25,9 +27,11 @@ import com.google.devtools.build.lib.analysis.RuleConfiguredTarget.Mode;
 import com.google.devtools.build.lib.analysis.RuleContext;
 import com.google.devtools.build.lib.analysis.TransitiveInfoCollection;
 import com.google.devtools.build.lib.cmdline.Label;
+import com.google.devtools.build.lib.cmdline.PackageIdentifier;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.packages.BuildType;
+import com.google.devtools.build.lib.packages.RuleClass;
 import com.google.devtools.build.lib.rules.apple.Platform;
 import com.google.devtools.build.lib.rules.cpp.CcToolchainFeatures.FeatureConfiguration;
 import com.google.devtools.build.lib.rules.cpp.CppConfiguration.DynamicMode;
@@ -68,7 +72,7 @@ public final class CcCommon {
     public void collectMetadataArtifacts(Iterable<Artifact> objectFiles,
         AnalysisEnvironment analysisEnvironment, NestedSetBuilder<Artifact> metadataFilesBuilder) {
       for (Artifact artifact : objectFiles) {
-        Action action = analysisEnvironment.getLocalGeneratingAction(artifact);
+        ActionAnalysisMetadata action = analysisEnvironment.getLocalGeneratingAction(artifact);
         if (action instanceof CppCompileAction) {
           addOutputs(metadataFilesBuilder, action, CppFileTypes.COVERAGE_NOTES);
         }
@@ -178,7 +182,7 @@ public final class CcCommon {
   }
 
   public TransitiveLipoInfoProvider collectTransitiveLipoLabels(CcCompilationOutputs outputs) {
-    if (cppConfiguration.getFdoSupport().getFdoRoot() == null
+    if (CppHelper.getFdoSupport(ruleContext).getFdoRoot() == null
         || !cppConfiguration.isLipoContextCollector()) {
       return TransitiveLipoInfoProvider.EMPTY;
     }
@@ -195,10 +199,10 @@ public final class CcCommon {
    */
   List<Pair<Artifact, Label>> getSources() {
     Map<Artifact, Label> map = Maps.newLinkedHashMap();
-    Iterable<FileProvider> providers =
-        ruleContext.getPrerequisites("srcs", Mode.TARGET, FileProvider.class);
-    for (FileProvider provider : providers) {
-      for (Artifact artifact : provider.getFilesToBuild()) {
+    Iterable<? extends TransitiveInfoCollection> providers =
+        ruleContext.getPrerequisitesIf("srcs", Mode.TARGET, FileProvider.class);
+    for (TransitiveInfoCollection provider : providers) {
+      for (Artifact artifact : provider.getProvider(FileProvider.class).getFilesToBuild()) {
         // TODO(bazel-team): We currently do not produce an error for duplicate headers and other
         // non-source artifacts with different labels, as that would require cleaning up the code
         // base without significant benefit; we should eventually make this consistent one way or
@@ -206,7 +210,7 @@ public final class CcCommon {
         Label oldLabel = map.put(artifact, provider.getLabel());
         boolean isHeader = CppFileTypes.CPP_HEADER.matches(artifact.getExecPath());
         if (!isHeader
-            && CcLibraryHelper.SOURCE_TYPES.matches(artifact.getExecPathString())
+            && SourceCategory.CC_AND_OBJC.getSourceTypes().matches(artifact.getExecPathString())
             && oldLabel != null
             && !oldLabel.equals(provider.getLabel())) {
           ruleContext.attributeError("srcs", String.format(
@@ -239,15 +243,15 @@ public final class CcCommon {
               + "' from target '" + target.getLabel() + "' is not allowed in hdrs");
           continue;
         }
-        Label oldLabel = map.put(artifact, provider.getLabel());
-        if (oldLabel != null && !oldLabel.equals(provider.getLabel())) {
+        Label oldLabel = map.put(artifact, target.getLabel());
+        if (oldLabel != null && !oldLabel.equals(target.getLabel())) {
           ruleContext.attributeWarning(
               "hdrs",
               String.format(
                   "Artifact '%s' is duplicated (through '%s' and '%s')",
                   artifact.getExecPathString(),
                   oldLabel,
-                  provider.getLabel()));
+                  target.getLabel()));
         }
       }
     }
@@ -355,10 +359,10 @@ public final class CcCommon {
 
     // Gather up all the dirs from the rule's srcs as well as any of the srcs outputs.
     if (hasAttribute("srcs", BuildType.LABEL_LIST)) {
-      for (FileProvider src :
-          ruleContext.getPrerequisites("srcs", Mode.TARGET, FileProvider.class)) {
+      for (TransitiveInfoCollection src :
+          ruleContext.getPrerequisitesIf("srcs", Mode.TARGET, FileProvider.class)) {
         PathFragment packageDir = src.getLabel().getPackageIdentifier().getPathFragment();
-        for (Artifact a : src.getFilesToBuild()) {
+        for (Artifact a : src.getProvider(FileProvider.class).getFilesToBuild()) {
           result.add(packageDir);
           // Attempt to gather subdirectories that might contain include files.
           result.add(a.getRootRelativePath().getParentDirectory());
@@ -395,7 +399,8 @@ public final class CcCommon {
 
   private List<PathFragment> getIncludeDirsFromIncludesAttribute() {
     List<PathFragment> result = new ArrayList<>();
-    PathFragment packageFragment = ruleContext.getLabel().getPackageIdentifier().getPathFragment();
+    PackageIdentifier packageIdentifier = ruleContext.getLabel().getPackageIdentifier();
+    PathFragment packageFragment = packageIdentifier.getPathFragment();
     for (String includesAttr : ruleContext.attributes().get("includes", Type.STRING_LIST)) {
       includesAttr = ruleContext.expandMakeVariables("includes", includesAttr);
       if (includesAttr.startsWith("/")) {
@@ -407,6 +412,37 @@ public final class CcCommon {
       if (!includesPath.isNormalized()) {
         ruleContext.attributeError("includes",
             "Path references a path above the execution root.");
+      }
+      if (includesPath.segmentCount() == 0) {
+        ruleContext.attributeError(
+            "includes",
+            "'"
+                + includesAttr
+                + "' resolves to the workspace root, which would allow this rule and all of its "
+                + "transitive dependents to include any file in your workspace. Please include only"
+                + " what you need");
+      } else if (!includesPath.startsWith(packageFragment)) {
+        ruleContext.attributeWarning(
+            "includes",
+            "'"
+                + includesAttr
+                + "' resolves to '"
+                + includesPath
+                + "' not below the relative path of its package '"
+                + packageFragment
+                + "'. This will be an error in the future");
+        // TODO(janakr): Add a link to a page explaining the problem and fixes?
+      } else if (packageIdentifier.getRepository().isMain()
+          && !includesPath.startsWith(RuleClass.THIRD_PARTY_PREFIX)) {
+        ruleContext.attributeWarning(
+            "includes",
+            "'"
+                + includesAttr
+                + "' resolves to '"
+                + includesPath
+                + "' not in '"
+                + RuleClass.THIRD_PARTY_PREFIX
+                + "'. This will be an error in the future");
       }
       result.add(includesPath);
       result.add(ruleContext.getConfiguration().getGenfilesFragment().getRelative(includesPath));
@@ -428,11 +464,12 @@ public final class CcCommon {
       for (FileProvider provider :
           ruleContext.getPrerequisites("srcs", Mode.TARGET, FileProvider.class)) {
         prerequisites.addAll(
-            FileType.filter(provider.getFilesToBuild(), CcLibraryHelper.SOURCE_TYPES));
+            FileType.filter(
+                provider.getFilesToBuild(), SourceCategory.CC_AND_OBJC.getSourceTypes()));
       }
     }
     prerequisites.addTransitive(context.getDeclaredIncludeSrcs());
-    prerequisites.addTransitive(context.getAdditionalInputs());
+    prerequisites.addTransitive(context.getAdditionalInputs(CppHelper.usePic(ruleContext, false)));
     return prerequisites.build();
   }
 
@@ -463,7 +500,10 @@ public final class CcCommon {
         CppFileTypes.LINKER_SCRIPT);
   }
 
-  InstrumentedFilesProvider getInstrumentedFilesProvider(Iterable<Artifact> files,
+  /**
+   * Provides support for instrumentation.
+   */
+  public InstrumentedFilesProvider getInstrumentedFilesProvider(Iterable<Artifact> files,
       boolean withBaselineCoverage) {
     return cppConfiguration.isLipoContextCollector()
         ? InstrumentedFilesProviderImpl.EMPTY

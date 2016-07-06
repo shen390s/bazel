@@ -31,16 +31,27 @@ import com.google.devtools.build.lib.packages.AttributeMap;
 import com.google.devtools.build.lib.packages.Rule;
 import com.google.devtools.build.lib.packages.RuleClass;
 import com.google.devtools.build.lib.packages.RuleClass.Builder;
+import com.google.devtools.build.lib.packages.Target;
 
 /**
  * Rule definition for compiler definition.
  */
 public final class CcToolchainRule implements RuleDefinition {
-  private static final LateBoundLabel<BuildConfiguration> LIBC_LINK =
+
+  /**
+   * Determines if the given target is a cc_toolchain or one of its subclasses. New subclasses
+   * should be added to this method.
+   */
+  static boolean isCcToolchain(Target target) {
+    String ruleClass = ((Rule) target).getRuleClass();
+    return ruleClass.endsWith("cc_toolchain");
+  }
+
+  private static final LateBoundLabel<BuildConfiguration> LIBC_TOP =
       new LateBoundLabel<BuildConfiguration>(CppConfiguration.class) {
         @Override
-        public Label getDefault(Rule rule, AttributeMap attributes,
-            BuildConfiguration configuration) {
+        public Label resolve(
+            Rule rule, AttributeMap attributes, BuildConfiguration configuration) {
           return configuration.getFragment(CppConfiguration.class).getLibcLabel();
         }
       };
@@ -64,7 +75,7 @@ public final class CcToolchainRule implements RuleDefinition {
         .add(attr("supports_param_files", BOOLEAN).value(true))
         .add(attr("supports_header_parsing", BOOLEAN).value(false))
         // TODO(bazel-team): Should be using the TARGET configuration.
-        .add(attr(":libc_link", LABEL).cfg(HOST).value(LIBC_LINK))
+        .add(attr(":libc_top", LABEL).cfg(HOST).value(LIBC_TOP))
         .build();
   }
 

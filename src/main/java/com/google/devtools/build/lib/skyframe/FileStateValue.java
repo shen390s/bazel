@@ -103,7 +103,7 @@ public abstract class FileStateValue implements SkyValue {
   @VisibleForTesting
   @ThreadSafe
   public static SkyKey key(RootedPath rootedPath) {
-    return new SkyKey(SkyFunctions.FILE_STATE, rootedPath);
+    return SkyKey.create(SkyFunctions.FILE_STATE, rootedPath);
   }
 
   public abstract Type getType();
@@ -246,7 +246,7 @@ public abstract class FileStateValue implements SkyValue {
     @Override
     public String prettyPrint() {
       String contents = digest != null
-          ? String.format("digest of ", Arrays.toString(digest))
+          ? String.format("digest of %s", Arrays.toString(digest))
           : contentsProxy.prettyPrint();
       String extra = mtime != -1 ? String.format(" and mtime of %d", mtime) : "";
       return String.format("regular file with size of %d and %s%s", size, contents, extra);

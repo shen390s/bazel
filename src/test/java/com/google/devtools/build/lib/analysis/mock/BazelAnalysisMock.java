@@ -13,11 +13,10 @@
 // limitations under the License.
 package com.google.devtools.build.lib.analysis.mock;
 
-import static com.google.devtools.build.lib.packages.BuildType.LABEL;
-
 import com.google.common.base.Functions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableList.Builder;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.io.ByteStreams;
 import com.google.devtools.build.lib.analysis.ConfigurationCollectionFactory;
 import com.google.devtools.build.lib.analysis.config.ConfigurationFactory;
@@ -34,14 +33,20 @@ import com.google.devtools.build.lib.packages.util.MockToolsConfig;
 import com.google.devtools.build.lib.rules.android.AndroidConfiguration;
 import com.google.devtools.build.lib.rules.apple.AppleConfiguration;
 import com.google.devtools.build.lib.rules.cpp.CppConfigurationLoader;
+import com.google.devtools.build.lib.rules.cpp.FdoSupportFunction;
+import com.google.devtools.build.lib.rules.cpp.FdoSupportValue;
 import com.google.devtools.build.lib.rules.java.JavaConfigurationLoader;
 import com.google.devtools.build.lib.rules.java.JvmConfigurationLoader;
 import com.google.devtools.build.lib.rules.objc.J2ObjcConfiguration;
 import com.google.devtools.build.lib.rules.objc.ObjcConfigurationLoader;
 import com.google.devtools.build.lib.rules.python.PythonConfigurationLoader;
+import com.google.devtools.build.lib.testutil.BuildRuleBuilder;
+import com.google.devtools.build.lib.testutil.BuildRuleWithDefaultsBuilder;
 import com.google.devtools.build.lib.testutil.TestRuleClassProvider;
 import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.Path;
+import com.google.devtools.build.skyframe.SkyFunction;
+import com.google.devtools.build.skyframe.SkyFunctionName;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -71,6 +76,10 @@ public final class BazelAnalysisMock extends AnalysisMock {
                 "  name = 'objc_proto_cpp_lib',",
                 "  actual = '//objcproto:ProtocolBuffersCPP_lib',",
                 ")",
+                "bind(",
+                "  name = 'objc_protobuf_lib',",
+                "  actual = '//objcproto:protobuf_lib',",
+                ")",
                 "bind(name = 'android/sdk', actual='@bazel_tools//tools/android:sdk')",
                 "bind(name = 'tools/python', actual='//tools/python')"));
 
@@ -79,8 +88,20 @@ public final class BazelAnalysisMock extends AnalysisMock {
     config.create(
         "/bazel_tools_workspace/tools/jdk/BUILD",
         "package(default_visibility=['//visibility:public'])",
-        "java_toolchain(name = 'toolchain', encoding = 'UTF-8', source_version = '8', ",
-        "  target_version = '8')",
+        "java_toolchain(",
+        "  name = 'toolchain',",
+        "  encoding = 'UTF-8',",
+        "  source_version = '8',",
+        "  target_version = '8',",
+        "  bootclasspath = [':bootclasspath'],",
+        "  extclasspath = [':extclasspath'],",
+        "  javac = [':langtools'],",
+        "  javabuilder = ['JavaBuilder_deploy.jar'],",
+        "  header_compiler = ['turbine_deploy.jar'],",
+        "  singlejar = ['SingleJar_deploy.jar'],",
+        "  genclass = ['GenClass_deploy.jar'],",
+        "  ijar = ['ijar'],",
+        ")",
         "filegroup(name = 'jdk-null')",
         "filegroup(name = 'jdk-default', srcs = [':java'], path = 'jdk/jre')",
         "filegroup(name = 'jdk', srcs = [':jdk-default', ':jdk-null'])",
@@ -90,7 +111,8 @@ public final class BazelAnalysisMock extends AnalysisMock {
         // "dummy" is needed so that RedirectChaser stops here
         "filegroup(name='java', srcs = ['jdk/jre/bin/java', 'dummy'])",
         "exports_files(['JavaBuilder_deploy.jar','SingleJar_deploy.jar','TestRunner_deploy.jar',",
-        "               'JavaBuilderCanary_deploy.jar', 'ijar', 'GenClass_deploy.jar'])");
+        "               'JavaBuilderCanary_deploy.jar', 'ijar', 'GenClass_deploy.jar',",
+        "               'turbine_deploy.jar'])");
 
 
     ImmutableList<String> androidBuildContents = createAndroidBuildContents();
@@ -126,23 +148,21 @@ public final class BazelAnalysisMock extends AnalysisMock {
 
     List<Attribute> attrs = androidSdkRuleClass.getAttributes();
     Builder<String> androidBuildContents = ImmutableList.builder();
-    androidBuildContents
-        .add("android_sdk(")
-        .add("    name = 'sdk',")
-        .add("    android_jack = ':empty',")
-        .add("    jack = ':fail',")
-        .add("    jill = ':fail',")
-        .add("    resource_extractor = ':fail',");
 
-    for (Attribute attr : attrs) {
-      if (attr.getType() == LABEL && attr.isMandatory() && !attr.getName().startsWith(":")) {
-        androidBuildContents.add("    " + attr.getName() + " = ':" + attr.getName() + "',");
-      }
+    BuildRuleWithDefaultsBuilder ruleBuilder =
+        new BuildRuleWithDefaultsBuilder("android_sdk", "sdk")
+            .popuplateAttributes("", false);
+    androidBuildContents.add(ruleBuilder.build());
+    for (BuildRuleBuilder generatedRuleBuilder : ruleBuilder.getRulesToGenerate()) {
+      androidBuildContents.add(generatedRuleBuilder.build());
     }
+
     androidBuildContents
-        .add(")")
         .add("sh_binary(name = 'aar_generator', srcs = ['empty.sh'])")
+        .add("sh_binary(name = 'dexbuilder', srcs = ['empty.sh'])")
+        .add("sh_binary(name = 'dexmerger', srcs = ['empty.sh'])")
         .add("sh_binary(name = 'resources_processor', srcs = ['empty.sh'])")
+        .add("sh_binary(name = 'resource_shrinker', srcs = ['empty.sh'])")
         .add("android_library(name = 'incremental_stub_application')")
         .add("android_library(name = 'incremental_split_stub_application')")
         .add("sh_binary(name = 'stubify_manifest', srcs = ['empty.sh'])")
@@ -158,23 +178,7 @@ public final class BazelAnalysisMock extends AnalysisMock {
         .add("          runtime_deps = [ ':PackageParser_import'],")
         .add("          main_class = 'com.google.devtools.build.android.ideinfo.PackageParser')")
         .add("java_import(name = 'PackageParser_import',")
-        .add("          jars = [ 'package_parser_deploy.jar' ])");
-
-    for (Attribute attr : attrs) {
-      if (attr.getType() == LABEL && attr.isMandatory() && !attr.getName().startsWith(":")) {
-        if (attr.isExecutable()) {
-          androidBuildContents
-              .add("sh_binary(name = '" + attr.getName() + "',")
-              .add("          srcs = ['empty.sh'],")
-              .add(")");
-        } else {
-          androidBuildContents
-              .add("filegroup(name = '" + attr.getName() + "',")
-              .add("          srcs = ['fake.file'])");
-        }
-      }
-    }
-    androidBuildContents
+        .add("          jars = [ 'package_parser_deploy.jar' ])")
         .add("java_binary(name = 'IdlClass',")
         .add("            runtime_deps = [ ':idlclass_import' ],")
         .add("            main_class = 'com.google.devtools.build.android.idlclass.IdlClass')")
@@ -233,5 +237,13 @@ public final class BazelAnalysisMock extends AnalysisMock {
   @Override
   public MockCcSupport ccSupport() {
     return BazelMockCcSupport.INSTANCE;
+  }
+
+  @Override
+  public ImmutableMap<SkyFunctionName, SkyFunction> getSkyFunctions() {
+    ImmutableMap.Builder<SkyFunctionName, SkyFunction> skyFunctions = ImmutableMap.builder();
+    skyFunctions.putAll(super.getSkyFunctions());
+    skyFunctions.put(FdoSupportValue.SKYFUNCTION, new FdoSupportFunction());
+    return skyFunctions.build();
   }
 }

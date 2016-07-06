@@ -16,6 +16,7 @@ package com.google.devtools.build.docgen;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
+import com.google.devtools.build.lib.analysis.ConfiguredRuleClassProvider;
 import com.google.devtools.build.lib.analysis.RuleDefinition;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.packages.Attribute;
@@ -60,7 +61,10 @@ public class RuleDocumentationAttribute implements Comparable<RuleDocumentationA
   private final String attributeName;
   private final String htmlDocumentation;
   private final String commonType;
+  // Used to expand rule link references in the attribute documentation.
+  private RuleLinkExpander linkExpander;
   private int startLineCnt;
+  private String fileName;
   private Set<String> flags;
   private Attribute attribute;
 
@@ -71,7 +75,7 @@ public class RuleDocumentationAttribute implements Comparable<RuleDocumentationA
   static RuleDocumentationAttribute create(
       String attributeName, String commonType, String htmlDocumentation) {
     RuleDocumentationAttribute docAttribute = new RuleDocumentationAttribute(
-        null, attributeName, htmlDocumentation, 0, ImmutableSet.<String>of(), commonType);
+        null, attributeName, htmlDocumentation, 0, "", ImmutableSet.<String>of(), commonType);
     return docAttribute;
   }
 
@@ -80,14 +84,15 @@ public class RuleDocumentationAttribute implements Comparable<RuleDocumentationA
    * defined rule attributes.
    */
   static RuleDocumentationAttribute create(Class<? extends RuleDefinition> definitionClass,
-      String attributeName, String htmlDocumentation, int startLineCnt, Set<String> flags) {
+      String attributeName, String htmlDocumentation, int startLineCnt, String fileName,
+      Set<String> flags) {
     return new RuleDocumentationAttribute(definitionClass, attributeName, htmlDocumentation,
-        startLineCnt, flags, null);
+        startLineCnt, fileName, flags, null);
   }
 
   private RuleDocumentationAttribute(Class<? extends RuleDefinition> definitionClass,
-      String attributeName, String htmlDocumentation, int startLineCnt, Set<String> flags,
-      String commonType) {
+      String attributeName, String htmlDocumentation, int startLineCnt, String fileName,
+      Set<String> flags, String commonType) {
     Preconditions.checkNotNull(attributeName, "AttributeName must not be null.");
     this.definitionClass = definitionClass;
     this.attributeName = attributeName;
@@ -119,14 +124,25 @@ public class RuleDocumentationAttribute implements Comparable<RuleDocumentationA
   }
 
   /**
-   * Returns the raw html documentation of the rule attribute.
+   * Sets the {@link RuleLinkExpander} to be used to expand links in the HTML documentation.
    */
-  public String getHtmlDocumentation() {
-    // Replace the instances of the SYNOPSIS variable in the rule attribute doc with the
-    // empty string since the variables are no longer used but are still present in the
-    // rule doc comments..
-    // TODO(dzc): Remove uses of ${SYNOPSIS} from Bazel doc comments.
-    return htmlDocumentation.replace("${" + DocgenConsts.VAR_SYNOPSIS + "}", "");
+  public void setRuleLinkExpander(RuleLinkExpander linkExpander) {
+    this.linkExpander = linkExpander;
+  }
+
+  /**
+   * Returns the html documentation of the rule attribute.
+   */
+  public String getHtmlDocumentation() throws BuildEncyclopediaDocException {
+    String expandedHtmlDoc = htmlDocumentation;
+    if (linkExpander != null) {
+      try {
+        expandedHtmlDoc = linkExpander.expand(expandedHtmlDoc);
+      } catch (IllegalArgumentException e) {
+        throw new BuildEncyclopediaDocException(fileName, startLineCnt, e.getMessage());
+      }
+    }
+    return expandedHtmlDoc;
   }
 
   private String getDefaultValue() {
@@ -204,7 +220,8 @@ public class RuleDocumentationAttribute implements Comparable<RuleDocumentationA
    * RuleDocumentationAttribute in the rule definition ancestry graph. Returns -1
    * if definitionClass is not the ancestor (transitively) of usingClass.
    */
-  int getDefinitionClassAncestryLevel(Class<? extends RuleDefinition> usingClass) {
+  int getDefinitionClassAncestryLevel(Class<? extends RuleDefinition> usingClass,
+      ConfiguredRuleClassProvider ruleClassProvider) {
     if (usingClass.equals(definitionClass)) {
       return 0;
     }
@@ -216,7 +233,7 @@ public class RuleDocumentationAttribute implements Comparable<RuleDocumentationA
     // Searching the shortest path from usingClass to this.definitionClass using BFS
     do {
       Class<? extends RuleDefinition> ancestor = toVisit.removeFirst();
-      visitAncestor(ancestor, visited, toVisit);
+      visitAncestor(ancestor, visited, toVisit, ruleClassProvider);
       if (ancestor.equals(definitionClass)) {
         return visited.get(ancestor);
       }
@@ -227,19 +244,27 @@ public class RuleDocumentationAttribute implements Comparable<RuleDocumentationA
   private void visitAncestor(
       Class<? extends RuleDefinition> usingClass,
       Map<Class<? extends RuleDefinition>, Integer> visited,
-      LinkedList<Class<? extends RuleDefinition>> toVisit) {
-    RuleDefinition instance;
-    try {
-      instance = usingClass.newInstance();
-    } catch (IllegalAccessException | InstantiationException e) {
-      throw new IllegalStateException(e);
-    }
+      LinkedList<Class<? extends RuleDefinition>> toVisit,
+      ConfiguredRuleClassProvider ruleClassProvider) {
+    RuleDefinition instance = getRuleDefinition(usingClass, ruleClassProvider);
     for (Class<? extends RuleDefinition> ancestor : instance.getMetadata().ancestors()) {
       if (!visited.containsKey(ancestor)) {
         toVisit.addLast(ancestor);
         visited.put(ancestor, visited.get(usingClass) + 1);
       }
     }
+  }
+
+  private RuleDefinition getRuleDefinition(Class<? extends RuleDefinition> usingClass,
+      ConfiguredRuleClassProvider ruleClassProvider) {
+    if (ruleClassProvider == null) {
+      try {
+        return usingClass.newInstance();
+      } catch (IllegalAccessException | InstantiationException e) {
+        throw new IllegalStateException(e);
+      }
+    }
+    return ruleClassProvider.getRuleClassDefinition(usingClass.getName());
   }
 
   private int getAttributeOrderingPriority(RuleDocumentationAttribute attribute) {

@@ -22,6 +22,7 @@ import com.android.ide.common.res2.AssetSet;
 import com.android.ide.common.res2.ResourceSet;
 
 import java.io.File;
+import java.io.IOException;
 import java.nio.file.FileSystem;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
@@ -51,16 +52,19 @@ class DependencyAndroidData {
   @VisibleForTesting
   static DependencyAndroidData valueOf(String text, FileSystem fileSystem) {
     if (!VALID_REGEX.matcher(text).find()) {
-      throw new IllegalArgumentException(text
-          + " is not in the format 'resources[#resources]:assets[#assets]:manifest:"
-          + "r.txt:symbols.txt'");
+      throw new IllegalArgumentException(
+          text
+              + " is not in the format 'resources[#resources]:assets[#assets]:manifest:"
+              + "r.txt:symbols.txt'");
     }
     String[] parts = text.split("\\:");
     // TODO(bazel-team): Handle the local-r.txt file.
     // The local R is optional -- if it is missing, we'll use the full R.txt
-    return new DependencyAndroidData(splitPaths(parts[0], fileSystem),
+    return new DependencyAndroidData(
+        splitPaths(parts[0], fileSystem),
         parts[1].length() == 0 ? ImmutableList.<Path>of() : splitPaths(parts[1], fileSystem),
-        exists(fileSystem.getPath(parts[2])), exists(fileSystem.getPath(parts[3])),
+        exists(fileSystem.getPath(parts[2])),
+        exists(fileSystem.getPath(parts[3])),
         parts.length == 5 ? fileSystem.getPath(parts[4]) : null);
   }
 
@@ -89,8 +93,12 @@ class DependencyAndroidData {
   private final ImmutableList<Path> resourceDirs;
   private final Path symbolsTxt;
 
-  public DependencyAndroidData(ImmutableList<Path> resourceDirs, ImmutableList<Path> assetDirs,
-      Path manifest, Path rTxt, Path symbolsTxt) {
+  public DependencyAndroidData(
+      ImmutableList<Path> resourceDirs,
+      ImmutableList<Path> assetDirs,
+      Path manifest,
+      Path rTxt,
+      Path symbolsTxt) {
     this.resourceDirs = resourceDirs;
     this.assetDirs = assetDirs;
     this.manifest = manifest;
@@ -104,6 +112,7 @@ class DependencyAndroidData {
       public File getManifest() {
         return manifest.toFile();
       }
+
       @Override
       public File getSymbolFile() {
         return rTxt == null ? null : rTxt.toFile();
@@ -130,8 +139,9 @@ class DependencyAndroidData {
   }
 
   /**
-   * Adds all the resource directories as ResourceSets. This acts a loose merge
-   * strategy as it does not test for overrides.
+   * Adds all the resource directories as ResourceSets. This acts a loose merge strategy as it does
+   * not test for overrides.
+   *
    * @param resourceSets A list of resource sets to append to.
    */
   void addAsResourceSets(List<ResourceSet> resourceSets) {
@@ -143,8 +153,9 @@ class DependencyAndroidData {
   }
 
   /**
-   * Adds all the asset directories as AssetSets. This acts a loose merge
-   * strategy as it does not test for overrides.
+   * Adds all the asset directories as AssetSets. This acts a loose merge strategy as it does not
+   * test for overrides.
+   *
    * @param assetSets A list of asset sets to append to.
    */
   void addAsAssetSets(List<AssetSet> assetSets) {
@@ -157,12 +168,8 @@ class DependencyAndroidData {
 
   @Override
   public String toString() {
-    return String.format("AndroidData(%s, %s, %s, %s, %s)",
-        resourceDirs,
-        assetDirs,
-        manifest,
-        rTxt,
-        symbolsTxt);
+    return String.format(
+        "AndroidData(%s, %s, %s, %s, %s)", resourceDirs, assetDirs, manifest, rTxt, symbolsTxt);
   }
 
   @Override
@@ -197,5 +204,25 @@ class DependencyAndroidData {
       modifiedResources = modifier.modify(modifiedResources);
     }
     return new DependencyAndroidData(modifiedResources, modifiedAssets, manifest, rTxt, null);
+  }
+
+  public void walk(final AndroidDataPathWalker pathWalker) throws IOException {
+    for (Path path : resourceDirs) {
+      pathWalker.walkResources(path);
+    }
+    for (Path path : assetDirs) {
+      pathWalker.walkAssets(path);
+    }
+  }
+
+  public void deserialize(
+      AndroidDataSerializer serializer,
+      KeyValueConsumers consumers)
+      throws DeserializationException {
+    // Missing symbolsTxt means the resources where provided via android_resources rules.
+    if (symbolsTxt == null) {
+      throw new DeserializationException(true);
+    }
+    serializer.read(symbolsTxt, consumers);
   }
 }

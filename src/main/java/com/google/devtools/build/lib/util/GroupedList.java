@@ -94,8 +94,26 @@ public class GroupedList<T> implements Iterable<Collection<T>> {
     size -= toRemove.size();
   }
 
-  /** Returns the number of elements in this list. */
-  public int size() {
+  /** Returns the group at position {@code i}. {@code i} must be less than {@link #listSize()}. */
+  @SuppressWarnings("unchecked") // Cast of Object to List<T> or T.
+  public List<T> get(int i) {
+    Object obj = elements.get(i);
+    if (obj instanceof List) {
+      return (List<T>) obj;
+    }
+    return ImmutableList.of((T) obj);
+  }
+
+  /** Returns the number of groups in this list. */
+  public int listSize() {
+    return elements.size();
+  }
+
+  /**
+   * Returns the number of individual elements of type {@link T} in this list, as opposed to the
+   * number of groups -- equivalent to adding up the sizes of each group in this list.
+   */
+  public int numElements() {
     return size;
   }
 
@@ -107,7 +125,7 @@ public class GroupedList<T> implements Iterable<Collection<T>> {
   private static final Object EMPTY_LIST = new Object();
 
   public Object compress() {
-    switch (size()) {
+    switch (numElements()) {
       case 0:
         return EMPTY_LIST;
       case 1:
@@ -312,7 +330,7 @@ public class GroupedList<T> implements Iterable<Collection<T>> {
   public static class GroupedListHelper<E> implements Iterable<E> {
     // Non-final only for removal.
     private List<Object> groupedList;
-    private CompactHashSet<E> currentGroup = null;
+    private List<E> currentGroup = null;
     private final CompactHashSet<E> elements;
 
     public GroupedListHelper() {
@@ -361,7 +379,7 @@ public class GroupedList<T> implements Iterable<Collection<T>> {
      */
     public void startGroup() {
       Preconditions.checkState(currentGroup == null, this);
-      currentGroup = CompactHashSet.create();
+      currentGroup = new ArrayList<>();
     }
 
     /** Ends a group started with {@link #startGroup}. */

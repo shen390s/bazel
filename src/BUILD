@@ -57,7 +57,7 @@ genrule(
     outs = ["java.version"],
     cmd = """
           VERSION_LINE=$$(cat $< | grep target_version);
-          JAVA_VERSION=$$(echo $${VERSION_LINE} | sed 's/.*value="\\([^"]\\)".*/\\1/');
+          JAVA_VERSION=$$(echo $${VERSION_LINE} | sed 's/.*value=\\"\\([^\\"]\\)\\".*/\\1/');
           if [ -z "$${JAVA_VERSION}" ]; then
             echo "1.8" >$@  # Java 8 is the default
           elif [[ "$${JAVA_VERSION}" =~ ^[0-9]+$$ ]]; then
@@ -67,6 +67,32 @@ genrule(
           fi
           """,
 )
+
+# Create dummy tools so we can do select to prevent building iOS target on
+# Linux.
+OSX_DUMMY_TARGETS = [
+    "src/tools/xcode/actoolwrapper/actoolwrapper",
+    "src/tools/xcode/ibtoolwrapper/ibtoolwrapper",
+    "src/tools/xcode/momcwrapper/momcwrapper",
+    "src/tools/xcode/swiftstdlibtoolwrapper/swiftstdlibtoolwrapper",
+    "src/tools/xcode/environment/environment_plist",
+    "src/tools/xcode/xcrunwrapper/xcrunwrapper",
+    "src/objc_tools/bundlemerge/bundlemerge_deploy.jar",
+    "src/objc_tools/plmerge/plmerge_deploy.jar",
+    "src/objc_tools/xcodegen/xcodegen_deploy.jar",
+    "src/tools/xcode/realpath/realpath",
+    "src/tools/xcode/stdredirect/StdRedirect.dylib",
+]
+
+[
+    genrule(
+        name = "dummy_darwin_tool_" + name.replace("/", "_"),
+        srcs = [],
+        outs = ["dummy_darwin_tools/" + name],
+        cmd = "touch $@",
+    )
+    for name in OSX_DUMMY_TARGETS
+]
 
 filegroup(
     name = "darwin_tools",
@@ -83,8 +109,16 @@ filegroup(
         "//src/tools/xcode/realpath:realpath",
     ] + select({
         ":iphonesdk": ["//src/tools/xcode/stdredirect:StdRedirect.dylib"],
-        "//conditions:default": [],
+        "//conditions:default": [":dummy_darwin_tool_src_tools_xcode_stdredirect_StdRedirect.dylib"],
     }),
+)
+
+filegroup(
+    name = "dummy_darwin_tools",
+    srcs = [
+        "dummy_darwin_tool_" + name.replace("/", "_")
+        for name in OSX_DUMMY_TARGETS
+    ],
 )
 
 genrule(
@@ -92,7 +126,7 @@ genrule(
     srcs = [
         ":create_embedded_tools.sh",
         "//tools:embedded_tools_srcs",
-        "//third_party:srcs",
+        "//third_party:embedded_tools_srcs",
         "//src/java_tools/buildjar/java/com/google/devtools/build/buildjar/jarhelper:srcs",
         "//src/tools/android/java/com/google/devtools/build/android:embedded_tools",
         "//src/tools/android/java/com/google/devtools/build/android/ideinfo:embedded_tools",
@@ -100,16 +134,28 @@ genrule(
         "//src/tools/android/java/com/google/devtools/build/android/incrementaldeployment:srcs",
         "//src/tools/android/java/com/google/devtools/build/android/ziputils:embedded_tools",
         "//src/main/protobuf:srcs",
-        "//src/java_tools/buildjar:JavaBuilder_deploy.jar",
+        "//src/java_tools/buildjar:JavaBuilderDeploy",
+        "//src/java_tools/buildjar/java/com/google/devtools/build/java/turbine:turbine_deploy.jar",
         "//src/java_tools/singlejar:SingleJar_deploy.jar",
         "//src/java_tools/buildjar/java/com/google/devtools/build/buildjar/genclass:GenClass_deploy.jar",
         "//src/java_tools/junitrunner/java/com/google/testing/junit/runner:Runner_deploy.jar",
         "//third_party/ijar",
         "//third_party/java/apkbuilder:embedded_tools",
     ] + select({
-        ":darwin": [":darwin_tools"],
-        ":darwin_x86_64": [":darwin_tools"],
-        "//conditions:default": [],
+        ":darwin": [
+            ":darwin_tools",
+            "//third_party/ijar:zipper",
+        ],
+        ":darwin_x86_64": [
+            ":darwin_tools",
+            "//third_party/ijar:zipper",
+        ],
+        # Windows specifically exclude zipper for now.
+        ":windows": [":dummy_darwin_tools"],
+        "//conditions:default": [
+            ":dummy_darwin_tools",
+            "//third_party/ijar:zipper",
+        ],
     }),
     outs = ["embedded_tools.zip"],
     cmd = "$(location :create_embedded_tools.sh) $@ $(SRCS)",
@@ -148,7 +194,10 @@ genrule(
         "package-zip" + suffix,
     ],
     outs = ["bazel" + suffix],
-    cmd = "cat $(location //src/main/cpp:client) $(location :package-zip" + suffix + ") > $@ && zip -qA $@",
+    # In msys, a file path without .exe suffix(say foo), refers to a file with .exe
+    # suffix(say foo.exe), if foo.exe exists and foo doesn't. So, on windows, we
+    # need to remove bazel.exe first, so that cat to bazel won't fail.
+    cmd = "rm -f $@; cat $(location //src/main/cpp:client) $(location :package-zip" + suffix + ") > $@ && zip -qA $@",
     executable = 1,
     output_to_bindir = 1,
     visibility = [
@@ -209,4 +258,44 @@ config_setting(
     name = "windows",
     values = {"cpu": "x64_windows"},
     visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "srcs",
+    srcs = glob(["**"]) + [
+        "//src/java_tools/buildjar:srcs",
+        "//src/java_tools/junitrunner/java/com/google/testing/junit/junit4:srcs",
+        "//src/java_tools/junitrunner/java/com/google/testing/junit/runner:srcs",
+        "//src/java_tools/junitrunner/java/com/google/testing/junit/runner/internal:srcs",
+        "//src/java_tools/junitrunner/java/com/google/testing/junit/runner/junit4:srcs",
+        "//src/java_tools/junitrunner/java/com/google/testing/junit/runner/model:srcs",
+        "//src/java_tools/junitrunner/java/com/google/testing/junit/runner/sharding:srcs",
+        "//src/java_tools/junitrunner/java/com/google/testing/junit/runner/sharding/api:srcs",
+        "//src/java_tools/junitrunner/java/com/google/testing/junit/runner/sharding/testing:srcs",
+        "//src/java_tools/junitrunner/java/com/google/testing/junit/runner/util:srcs",
+        "//src/java_tools/singlejar:srcs",
+        "//src/main/cpp:srcs",
+        "//src/main/java/com/google/devtools/build/docgen:srcs",
+        "//src/main/java/com/google/devtools/build/lib:srcs",
+        "//src/main/java/com/google/devtools/build/skyframe:srcs",
+        "//src/main/java/com/google/devtools/common/options:srcs",
+        "//src/main/native:srcs",
+        "//src/main/protobuf:srcs",
+        "//src/main/tools:srcs",
+        "//src/objc_tools/bundlemerge:srcs",
+        "//src/objc_tools/plmerge:srcs",
+        "//src/objc_tools/xcodegen:srcs",
+        "//src/tools/android/java/com/google/devtools/build/android:srcs",
+        "//src/tools/generate_workspace:srcs",
+        "//src/tools/xcode/actoolwrapper:srcs",
+        "//src/tools/xcode/environment:srcs",
+        "//src/tools/xcode/ibtoolwrapper:srcs",
+        "//src/tools/xcode/momcwrapper:srcs",
+        "//src/tools/xcode/realpath:srcs",
+        "//src/tools/xcode/stdredirect:srcs",
+        "//src/tools/xcode/swiftstdlibtoolwrapper:srcs",
+        "//src/tools/xcode/xcrunwrapper:srcs",
+        "//src/tools/xcode-common:srcs",
+    ],
+    visibility = ["//:__pkg__"],
 )

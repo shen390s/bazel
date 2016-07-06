@@ -14,7 +14,7 @@
 package com.google.devtools.build.lib.skyframe;
 
 import static com.google.common.truth.Truth.assertThat;
-import static com.google.devtools.build.lib.actions.ActionInputHelper.artifactFile;
+import static com.google.devtools.build.lib.actions.ActionInputHelper.treeFileArtifact;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
@@ -23,13 +23,12 @@ import static org.junit.Assert.fail;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
-import com.google.common.collect.Iterables;
 import com.google.common.util.concurrent.Runnables;
 import com.google.devtools.build.lib.actions.Action;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.Artifact.SpecialArtifact;
 import com.google.devtools.build.lib.actions.Artifact.SpecialArtifactType;
-import com.google.devtools.build.lib.actions.ArtifactFile;
+import com.google.devtools.build.lib.actions.Artifact.TreeFileArtifact;
 import com.google.devtools.build.lib.actions.ArtifactOwner;
 import com.google.devtools.build.lib.actions.Root;
 import com.google.devtools.build.lib.actions.cache.DigestUtils;
@@ -41,8 +40,6 @@ import com.google.devtools.build.lib.packages.PackageFactory;
 import com.google.devtools.build.lib.pkgcache.PathPackageLocator;
 import com.google.devtools.build.lib.skyframe.DirtinessCheckerUtils.BasicFilesystemDirtinessChecker;
 import com.google.devtools.build.lib.testutil.TestRuleClassProvider;
-import com.google.devtools.build.lib.util.BlazeClock;
-import com.google.devtools.build.lib.util.Preconditions;
 import com.google.devtools.build.lib.util.io.TimestampGranularityMonitor;
 import com.google.devtools.build.lib.vfs.BatchStat;
 import com.google.devtools.build.lib.vfs.FileStatus;
@@ -94,7 +91,6 @@ public class FilesystemValueCheckerTest {
   private SequentialBuildDriver driver;
   private MockFileSystem fs;
   private Path pkgRoot;
-  private TimestampGranularityMonitor tsgm;
 
   @Before
   public final void setUp() throws Exception  {
@@ -105,11 +101,13 @@ public class FilesystemValueCheckerTest {
     FileSystemUtils.createDirectoryAndParents(pkgRoot);
     FileSystemUtils.createEmptyFile(pkgRoot.getRelative("WORKSPACE"));
 
-    tsgm = new TimestampGranularityMonitor(BlazeClock.instance());
     AtomicReference<PathPackageLocator> pkgLocator = new AtomicReference<>(new PathPackageLocator(
         fs.getPath("/output_base"), ImmutableList.of(pkgRoot)));
-    ExternalFilesHelper externalFilesHelper = new ExternalFilesHelper(pkgLocator, false);
-    skyFunctions.put(SkyFunctions.FILE_STATE, new FileStateFunction(tsgm, externalFilesHelper));
+    BlazeDirectories directories = new BlazeDirectories(pkgRoot, pkgRoot, pkgRoot);
+    ExternalFilesHelper externalFilesHelper = new ExternalFilesHelper(
+        pkgLocator, false, directories);
+    skyFunctions.put(SkyFunctions.FILE_STATE, new FileStateFunction(
+        new AtomicReference<TimestampGranularityMonitor>(), externalFilesHelper));
     skyFunctions.put(SkyFunctions.FILE, new FileFunction(pkgLocator));
     skyFunctions.put(
         SkyFunctions.FILE_SYMLINK_CYCLE_UNIQUENESS, new FileSymlinkCycleUniquenessFunction());
@@ -125,7 +123,7 @@ public class FilesystemValueCheckerTest {
     skyFunctions.put(SkyFunctions.WORKSPACE_FILE,
         new WorkspaceFileFunction(TestRuleClassProvider.getRuleClassProvider(),
             new PackageFactory(TestRuleClassProvider.getRuleClassProvider()),
-            new BlazeDirectories(pkgRoot, pkgRoot, pkgRoot)));
+            directories));
     skyFunctions.put(SkyFunctions.EXTERNAL_PACKAGE, new ExternalPackageFunction());
 
     differencer = new RecordingDifferencer();
@@ -137,13 +135,13 @@ public class FilesystemValueCheckerTest {
 
   @Test
   public void testEmpty() throws Exception {
-    FilesystemValueChecker checker = new FilesystemValueChecker(tsgm, null);
+    FilesystemValueChecker checker = new FilesystemValueChecker(null, null);
     assertEmptyDiff(getDirtyFilesystemKeys(evaluator, checker));
   }
 
   @Test
   public void testSimple() throws Exception {
-    FilesystemValueChecker checker = new FilesystemValueChecker(tsgm, null);
+    FilesystemValueChecker checker = new FilesystemValueChecker(null, null);
 
     Path path = fs.getPath("/foo");
     FileSystemUtils.createEmptyFile(path);
@@ -187,7 +185,7 @@ public class FilesystemValueCheckerTest {
    */
   @Test
   public void testDirtySymlink() throws Exception {
-    FilesystemValueChecker checker = new FilesystemValueChecker(tsgm, null);
+    FilesystemValueChecker checker = new FilesystemValueChecker(null, null);
 
     Path path = fs.getPath("/foo");
     FileSystemUtils.writeContentAsLatin1(path, "foo contents");
@@ -259,7 +257,7 @@ public class FilesystemValueCheckerTest {
 
   @Test
   public void testExplicitFiles() throws Exception {
-    FilesystemValueChecker checker = new FilesystemValueChecker(tsgm, null);
+    FilesystemValueChecker checker = new FilesystemValueChecker(null, null);
 
     Path path1 = fs.getPath("/foo1");
     Path path2 = fs.getPath("/foo2");
@@ -312,7 +310,7 @@ public class FilesystemValueCheckerTest {
     assertTrue(result.hasError());
 
     fs.readlinkThrowsIoException = false;
-    FilesystemValueChecker checker = new FilesystemValueChecker(tsgm, null);
+    FilesystemValueChecker checker = new FilesystemValueChecker(null, null);
     Diff diff = getDirtyFilesystemKeys(evaluator, checker);
     assertThat(diff.changedKeysWithoutNewValues()).isEmpty();
     assertThat(diff.changedKeysWithNewValues()).isEmpty();
@@ -336,7 +334,7 @@ public class FilesystemValueCheckerTest {
             NullEventHandler.INSTANCE);
     assertTrue(result.hasError());
 
-    FilesystemValueChecker checker = new FilesystemValueChecker(tsgm, null);
+    FilesystemValueChecker checker = new FilesystemValueChecker(null, null);
     Diff diff = getDirtyFilesystemKeys(evaluator, checker);
     assertThat(diff.changedKeysWithoutNewValues()).isEmpty();
     assertThat(diff.changedKeysWithNewValues()).isEmpty();
@@ -363,28 +361,27 @@ public class FilesystemValueCheckerTest {
         driver
             .evaluate(ImmutableList.<SkyKey>of(), false, 1, NullEventHandler.INSTANCE)
             .hasError());
-    assertThat(new FilesystemValueChecker(tsgm, null).getDirtyActionValues(evaluator.getValues(),
+    assertThat(new FilesystemValueChecker(null, null).getDirtyActionValues(evaluator.getValues(),
         batchStatter, ModifiedFileSet.EVERYTHING_MODIFIED)).isEmpty();
 
     FileSystemUtils.writeContentAsLatin1(out1.getPath(), "goodbye");
-    assertEquals(
-        ActionExecutionValue.key(action1),
-        Iterables.getOnlyElement(
-            new FilesystemValueChecker(tsgm, null).getDirtyActionValues(evaluator.getValues(),
-                batchStatter, ModifiedFileSet.EVERYTHING_MODIFIED)));
-    assertEquals(
-        ActionExecutionValue.key(action1),
-        Iterables.getOnlyElement(
-            new FilesystemValueChecker(tsgm, null).getDirtyActionValues(evaluator.getValues(),
-                batchStatter,
-                new ModifiedFileSet.Builder().modify(out1.getExecPath()).build())));
     assertThat(
-            new FilesystemValueChecker(tsgm, null).getDirtyActionValues(evaluator.getValues(),
+        new FilesystemValueChecker(null, null).getDirtyActionValues(
+            evaluator.getValues(), batchStatter, ModifiedFileSet.EVERYTHING_MODIFIED))
+        .containsExactly(ActionExecutionValue.key(action1));
+    assertThat(
+        new FilesystemValueChecker(null, null).getDirtyActionValues(
+            evaluator.getValues(),
+            batchStatter,
+            new ModifiedFileSet.Builder().modify(out1.getExecPath()).build()))
+        .containsExactly(ActionExecutionValue.key(action1));
+    assertThat(
+            new FilesystemValueChecker(null, null).getDirtyActionValues(evaluator.getValues(),
                 batchStatter,
                 new ModifiedFileSet.Builder().modify(
                     out1.getExecPath().getParentDirectory()).build())).isEmpty();
     assertThat(
-        new FilesystemValueChecker(tsgm, null).getDirtyActionValues(evaluator.getValues(),
+        new FilesystemValueChecker(null, null).getDirtyActionValues(evaluator.getValues(),
             batchStatter, ModifiedFileSet.NOTHING_MODIFIED)).isEmpty();
   }
 
@@ -395,14 +392,14 @@ public class FilesystemValueCheckerTest {
     // contents into ActionExecutionValues.
 
     Artifact out1 = createTreeArtifact("one");
-    ArtifactFile file11 = artifactFile(out1, "fizz");
+    TreeFileArtifact file11 = treeFileArtifact(out1, "fizz");
     FileSystemUtils.createDirectoryAndParents(out1.getPath());
     FileSystemUtils.writeContentAsLatin1(file11.getPath(), "buzz");
 
     Artifact out2 = createTreeArtifact("two");
     FileSystemUtils.createDirectoryAndParents(out2.getPath().getChild("subdir"));
-    ArtifactFile file21 = artifactFile(out2, "moony");
-    ArtifactFile file22 = artifactFile(out2, "subdir/wormtail");
+    TreeFileArtifact file21 = treeFileArtifact(out2, "moony");
+    TreeFileArtifact file22 = treeFileArtifact(out2, "subdir/wormtail");
     FileSystemUtils.writeContentAsLatin1(file21.getPath(), "padfoot");
     FileSystemUtils.writeContentAsLatin1(file22.getPath(), "prongs");
 
@@ -439,25 +436,25 @@ public class FilesystemValueCheckerTest {
         driver
             .evaluate(ImmutableList.<SkyKey>of(), false, 1, NullEventHandler.INSTANCE)
             .hasError());
-    assertThat(new FilesystemValueChecker(tsgm, null).getDirtyActionValues(evaluator.getValues(),
+    assertThat(new FilesystemValueChecker(null, null).getDirtyActionValues(evaluator.getValues(),
         batchStatter, ModifiedFileSet.EVERYTHING_MODIFIED)).isEmpty();
 
     // Touching the TreeArtifact directory should have no effect
     FileSystemUtils.touchFile(out1.getPath());
     assertThat(
-        new FilesystemValueChecker(tsgm, null).getDirtyActionValues(evaluator.getValues(),
+        new FilesystemValueChecker(null, null).getDirtyActionValues(evaluator.getValues(),
             batchStatter, ModifiedFileSet.EVERYTHING_MODIFIED)).isEmpty();
     // Neither should touching a subdirectory.
     FileSystemUtils.touchFile(out2.getPath().getChild("subdir"));
     assertThat(
-        new FilesystemValueChecker(tsgm, null).getDirtyActionValues(evaluator.getValues(),
+        new FilesystemValueChecker(null, null).getDirtyActionValues(evaluator.getValues(),
             batchStatter, ModifiedFileSet.EVERYTHING_MODIFIED)).isEmpty();
 
     /* **** Tests for directories **** */
 
     // Removing a directory (even if empty) should have an effect
     outEmpty.getPath().delete();
-    assertThat(new FilesystemValueChecker(tsgm, null).getDirtyActionValues(evaluator.getValues(),
+    assertThat(new FilesystemValueChecker(null, null).getDirtyActionValues(evaluator.getValues(),
         batchStatter,
         new ModifiedFileSet.Builder().modify(outEmpty.getExecPath()).build()))
         .containsExactly(ActionExecutionValue.key(actionEmpty));
@@ -465,7 +462,7 @@ public class FilesystemValueCheckerTest {
     Path dummyEmptyDir = fs.getPath("/bin").getRelative("symlink");
     FileSystemUtils.createDirectoryAndParents(dummyEmptyDir);
     FileSystemUtils.ensureSymbolicLink(outEmpty.getPath(), dummyEmptyDir);
-    assertThat(new FilesystemValueChecker(tsgm, null).getDirtyActionValues(evaluator.getValues(),
+    assertThat(new FilesystemValueChecker(null, null).getDirtyActionValues(evaluator.getValues(),
         batchStatter,
         new ModifiedFileSet.Builder().modify(outEmpty.getExecPath()).build()))
         .containsExactly(ActionExecutionValue.key(actionEmpty));
@@ -480,29 +477,29 @@ public class FilesystemValueCheckerTest {
     // Test that file contents matter. This is covered by existing tests already,
     // so it's just a sanity check.
     FileSystemUtils.writeContentAsLatin1(file11.getPath(), "goodbye");
-    assertEquals(
-        ActionExecutionValue.key(action1),
-        Iterables.getOnlyElement(
-            new FilesystemValueChecker(tsgm, null).getDirtyActionValues(evaluator.getValues(),
-                batchStatter,
-                new ModifiedFileSet.Builder().modify(file11.getExecPath()).build())));
+    assertThat(
+        new FilesystemValueChecker(null, null).getDirtyActionValues(
+            evaluator.getValues(),
+            batchStatter,
+            new ModifiedFileSet.Builder().modify(file11.getExecPath()).build()))
+        .containsExactly(ActionExecutionValue.key(action1));
 
     // Test that directory contents (and nested contents) matter
-    ArtifactFile out1new = artifactFile(out1, "julius/caesar");
+    Artifact out1new = treeFileArtifact(out1, "julius/caesar");
     FileSystemUtils.createDirectoryAndParents(out1.getPath().getChild("julius"));
     FileSystemUtils.writeContentAsLatin1(out1new.getPath(), "octavian");
     // even for empty directories
-    ArtifactFile outEmptyNew = artifactFile(outEmpty, "marcus");
+    Artifact outEmptyNew = treeFileArtifact(outEmpty, "marcus");
     FileSystemUtils.writeContentAsLatin1(outEmptyNew.getPath(), "aurelius");
     // so does removing
     file21.getPath().delete();
     // now, let's test our changes are actually visible
-    assertThat(new FilesystemValueChecker(tsgm, null).getDirtyActionValues(evaluator.getValues(),
+    assertThat(new FilesystemValueChecker(null, null).getDirtyActionValues(evaluator.getValues(),
             batchStatter, ModifiedFileSet.EVERYTHING_MODIFIED))
         .containsExactly(ActionExecutionValue.key(action1), ActionExecutionValue.key(action2),
             ActionExecutionValue.key(actionEmpty));
     assertThat(
-        new FilesystemValueChecker(tsgm, null).getDirtyActionValues(evaluator.getValues(),
+        new FilesystemValueChecker(null, null).getDirtyActionValues(evaluator.getValues(),
             batchStatter,
             new ModifiedFileSet.Builder()
                 .modify(file21.getExecPath())
@@ -514,7 +511,7 @@ public class FilesystemValueCheckerTest {
     // We add a test for NOTHING_MODIFIED, because FileSystemValueChecker doesn't
     // pay attention to file sets for TreeArtifact directory listings.
     assertThat(
-        new FilesystemValueChecker(tsgm, null).getDirtyActionValues(evaluator.getValues(),
+        new FilesystemValueChecker(null, null).getDirtyActionValues(evaluator.getValues(),
             batchStatter, ModifiedFileSet.NOTHING_MODIFIED)).isEmpty();
   }
 
@@ -628,7 +625,7 @@ public class FilesystemValueCheckerTest {
         FileStatusWithDigest stat =
             forceDigest ? statWithDigest(path, path.statIfFound(Symlinks.NOFOLLOW)) : null;
         artifactData.put(output,
-            ActionMetadataHandler.fileValueFromArtifactFile(output, stat, tsgm));
+            ActionMetadataHandler.fileValueFromArtifact(output, stat, null));
       } catch (IOException e) {
         throw new IllegalStateException(e);
       }
@@ -641,28 +638,27 @@ public class FilesystemValueCheckerTest {
 
   private ActionExecutionValue actionValueWithEmptyDirectory(Artifact emptyDir) {
     TreeArtifactValue emptyValue = TreeArtifactValue.create
-        (ImmutableMap.<PathFragment, FileArtifactValue>of());
+        (ImmutableMap.<TreeFileArtifact, FileArtifactValue>of());
 
     return new ActionExecutionValue(
-        ImmutableMap.<ArtifactFile, FileValue>of(),
+        ImmutableMap.<Artifact, FileValue>of(),
         ImmutableMap.of(emptyDir, emptyValue),
         ImmutableMap.<Artifact, FileArtifactValue>of());
   }
 
-  private ActionExecutionValue actionValueWithTreeArtifacts(List<ArtifactFile> contents) {
-    Map<ArtifactFile, FileValue> fileData = new HashMap<>();
-    Map<Artifact, Map<ArtifactFile, FileArtifactValue>> directoryData = new HashMap<>();
+  private ActionExecutionValue actionValueWithTreeArtifacts(List<TreeFileArtifact> contents) {
+    Map<Artifact, FileValue> fileData = new HashMap<>();
+    Map<Artifact, Map<TreeFileArtifact, FileArtifactValue>> directoryData = new HashMap<>();
 
-    for (ArtifactFile output : contents) {
-      Preconditions.checkState(!(output instanceof Artifact));
+    for (TreeFileArtifact output : contents) {
       try {
-        Map<ArtifactFile, FileArtifactValue> dirDatum =
+        Map<TreeFileArtifact, FileArtifactValue> dirDatum =
             directoryData.get(output.getParent());
         if (dirDatum == null) {
           dirDatum = new HashMap<>();
           directoryData.put(output.getParent(), dirDatum);
         }
-        FileValue fileValue = ActionMetadataHandler.fileValueFromArtifactFile(output, null, tsgm);
+        FileValue fileValue = ActionMetadataHandler.fileValueFromArtifact(output, null, null);
         // Always test with digests. TreeArtifact checking behavior doesn't depend on the
         // presence/absence of digests. FileValue checking w/o digests is already tested.
         byte[] digest = DigestUtils.getDigestOrFail(output.getPath(), 1);
@@ -675,14 +671,9 @@ public class FilesystemValueCheckerTest {
     }
 
     Map<Artifact, TreeArtifactValue> treeArtifactData = new HashMap<>();
-    for (Map.Entry<Artifact, Map<ArtifactFile, FileArtifactValue>> dirDatum :
+    for (Map.Entry<Artifact, Map<TreeFileArtifact, FileArtifactValue>> dirDatum :
         directoryData.entrySet()) {
-      Map<PathFragment, FileArtifactValue> artifactValues = new HashMap<>();
-      for (Map.Entry<ArtifactFile, FileArtifactValue> dirEntry : dirDatum.getValue().entrySet()) {
-        ArtifactFile file = dirEntry.getKey();
-        artifactValues.put(file.getParentRelativePath(), dirEntry.getValue());
-      }
-      treeArtifactData.put(dirDatum.getKey(), TreeArtifactValue.create(artifactValues));
+      treeArtifactData.put(dirDatum.getKey(), TreeArtifactValue.create(dirDatum.getValue()));
     }
 
     return new ActionExecutionValue(fileData, treeArtifactData,
@@ -695,7 +686,7 @@ public class FilesystemValueCheckerTest {
         ImmutableList.of(FileValue.key(RootedPath.toRootedPath(pkgRoot, new PathFragment("foo"))));
     driver.evaluate(
         values, false, SkyframeExecutor.DEFAULT_THREAD_COUNT, NullEventHandler.INSTANCE);
-    FilesystemValueChecker checker = new FilesystemValueChecker(tsgm, null);
+    FilesystemValueChecker checker = new FilesystemValueChecker(null, null);
 
     assertEmptyDiff(getDirtyFilesystemKeys(evaluator, checker));
 

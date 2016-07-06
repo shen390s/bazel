@@ -21,12 +21,13 @@ import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.cmdline.LabelSyntaxException;
 import com.google.devtools.build.lib.cmdline.RepositoryName;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
+import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.packages.AggregatingAttributeMapper;
 import com.google.devtools.build.lib.packages.BuildFileContainsErrorsException;
 import com.google.devtools.build.lib.packages.NoSuchPackageException;
 import com.google.devtools.build.lib.packages.Package;
 import com.google.devtools.build.lib.packages.Rule;
-import com.google.devtools.build.lib.packages.RuleSerializer;
+import com.google.devtools.build.lib.skyframe.DirectoryListingValue;
 import com.google.devtools.build.lib.skyframe.FileSymlinkException;
 import com.google.devtools.build.lib.skyframe.FileValue;
 import com.google.devtools.build.lib.skyframe.InconsistentFilesystemException;
@@ -34,8 +35,8 @@ import com.google.devtools.build.lib.skyframe.PackageLookupValue;
 import com.google.devtools.build.lib.skyframe.WorkspaceFileValue;
 import com.google.devtools.build.lib.syntax.EvalException;
 import com.google.devtools.build.lib.syntax.Type;
-import com.google.devtools.build.lib.util.Fingerprint;
 import com.google.devtools.build.lib.util.Preconditions;
+import com.google.devtools.build.lib.vfs.FileSystem;
 import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
@@ -49,7 +50,7 @@ import com.google.devtools.build.skyframe.SkyValue;
 
 import java.io.IOException;
 import java.nio.charset.Charset;
-import java.util.Arrays;
+import java.util.Map;
 
 import javax.annotation.Nullable;
 
@@ -82,6 +83,9 @@ import javax.annotation.Nullable;
  * {@link RepositoryDirectoryValue} is invalidated using the usual Skyframe route.
  */
 public abstract class RepositoryFunction {
+
+  protected Map<String, String> clientEnvironment;
+
   /**
    * Exception thrown when something goes wrong accessing a remote repository.
    *
@@ -106,6 +110,7 @@ public abstract class RepositoryFunction {
     public RepositoryFunctionException(EvalException cause, Transience transience) {
       super(cause, transience);
     }
+
   }
 
   /**
@@ -119,15 +124,6 @@ public abstract class RepositoryFunction {
               "The repository named '" + repositoryName + "' could not be resolved"),
           Transience.PERSISTENT);
     }
-  }
-
-  private BlazeDirectories directories;
-
-  private byte[] computeRuleKey(Rule rule, byte[] ruleSpecificData) {
-    return new Fingerprint()
-        .addBytes(RuleSerializer.serializeRule(rule).build().toByteArray())
-        .addBytes(ruleSpecificData)
-        .digestAndReset();
   }
 
   /**
@@ -150,8 +146,9 @@ public abstract class RepositoryFunction {
    */
   @ThreadSafe
   @Nullable
-  public abstract SkyValue fetch(Rule rule, Path outputDirectory, Environment env)
-      throws SkyFunctionException, InterruptedException;
+  public abstract SkyValue fetch(
+      Rule rule, Path outputDirectory, BlazeDirectories directories, Environment env)
+          throws SkyFunctionException, InterruptedException;
 
   /**
    * Whether fetching is done using local operations only.
@@ -159,7 +156,7 @@ public abstract class RepositoryFunction {
    * <p>If this is false, Bazel may decide not to re-fetch the repository, for example when the
    * {@code --nofetch} command line option is used.
    */
-  protected abstract boolean isLocal();
+  protected abstract boolean isLocal(Rule rule);
 
   /**
    * Returns a block of data that must be equal for two Rules for them to be considered the same.
@@ -169,51 +166,8 @@ public abstract class RepositoryFunction {
    * to keep it working somehow)
    */
   protected byte[] getRuleSpecificMarkerData(Rule rule, Environment env)
-    throws RepositoryFunctionException {
+      throws RepositoryFunctionException {
     return new byte[] {};
-  }
-
-  private Path getMarkerPath(Rule rule) {
-    return getExternalRepositoryDirectory().getChild("@" + rule.getName() + ".marker");
-  }
-
-  /**
-   * Checks if the state of the repository in the file system is consistent with the rule in the
-   * WORKSPACE file.
-   *
-   * <p>Deletes the marker file if not so that no matter what happens after, the state of the file
-   * system stays consistent.
-   */
-  boolean isFilesystemUpToDate(Rule rule, byte[] ruleSpecificData)
-      throws RepositoryFunctionException {
-    try {
-      Path markerPath = getMarkerPath(rule);
-      if (!markerPath.exists()) {
-        return false;
-      }
-
-      boolean result = Arrays.equals(
-          computeRuleKey(rule, ruleSpecificData),
-          FileSystemUtils.readContent(markerPath));
-      if (!result) {
-        // So that we are in a consistent state if something happens while fetching the repository
-        markerPath.delete();
-      }
-
-      return result;
-
-    } catch (IOException e) {
-      throw new RepositoryFunctionException(e, Transience.TRANSIENT);
-    }
-  }
-
-  void writeMarkerFile(Rule rule, byte[] ruleSpecificData)
-      throws RepositoryFunctionException {
-    try {
-      FileSystemUtils.writeContent(getMarkerPath(rule), computeRuleKey(rule, ruleSpecificData));
-    } catch (IOException e) {
-      throw new RepositoryFunctionException(e, Transience.TRANSIENT);
-    }
   }
 
   protected Path prepareLocalRepositorySymlinkTree(Rule rule, Path repositoryDirectory)
@@ -225,17 +179,18 @@ public abstract class RepositoryFunction {
     }
 
     // Add x/WORKSPACE.
-    createWorkspaceFile(repositoryDirectory, rule);
+    createWorkspaceFile(repositoryDirectory, rule.getTargetKind(), rule.getName());
     return repositoryDirectory;
   }
 
-  protected void createWorkspaceFile(Path repositoryDirectory, Rule rule)
+  public static void createWorkspaceFile(
+      Path repositoryDirectory, String ruleKind, String ruleName)
       throws RepositoryFunctionException {
     try {
       Path workspaceFile = repositoryDirectory.getRelative("WORKSPACE");
       FileSystemUtils.writeContent(workspaceFile, Charset.forName("UTF-8"),
           String.format("# DO NOT EDIT: automatically generated WORKSPACE file for %s\n"
-              + "workspace(name = \"%s\")", rule, rule.getName()));
+              + "workspace(name = \"%s\")\n", ruleKind, ruleName));
     } catch (IOException e) {
       throw new RepositoryFunctionException(e, Transience.TRANSIENT);
     }
@@ -254,8 +209,7 @@ public abstract class RepositoryFunction {
   }
 
   @VisibleForTesting
-  protected static PathFragment getTargetPath(Rule rule, Path workspace)
-      throws RepositoryFunctionException {
+  protected static PathFragment getTargetPath(Rule rule, Path workspace) {
     AggregatingAttributeMapper mapper = AggregatingAttributeMapper.of(rule);
     String path = mapper.get("path", Type.STRING);
     PathFragment pathFragment = new PathFragment(path);
@@ -330,9 +284,9 @@ public abstract class RepositoryFunction {
       if (value == null) {
         return null;
       }
-      // TODO(dmarting): stop at cycle and report a more intelligible error than cycle reporting.
       Package externalPackage = value.getPackage();
       if (externalPackage.containsErrors()) {
+        Event.replayEventsOn(env.getListener(), externalPackage.getEvents());
         throw new RepositoryFunctionException(
             new BuildFileContainsErrorsException(
                 Label.EXTERNAL_PACKAGE_IDENTIFIER, "Could not load //external package"),
@@ -350,7 +304,7 @@ public abstract class RepositoryFunction {
   @Nullable
   public static Rule getRule(
       String ruleName, @Nullable String ruleClassName, Environment env)
-      throws RepositoryFunctionException {
+          throws RepositoryFunctionException {
     try {
       return getRule(RepositoryName.create("@" + ruleName), ruleClassName, env);
     } catch (LabelSyntaxException e) {
@@ -368,7 +322,7 @@ public abstract class RepositoryFunction {
   @Nullable
   public static Rule getRule(
       RepositoryName repositoryName, @Nullable String ruleClassName, Environment env)
-      throws RepositoryFunctionException {
+          throws RepositoryFunctionException {
     Rule rule = getRule(repositoryName.strippedName(), env);
     Preconditions.checkState(
         rule == null || ruleClassName == null || rule.getRuleClass().equals(ruleClassName),
@@ -397,17 +351,6 @@ public abstract class RepositoryFunction {
     return value;
   }
 
-  /**
-   * Sets up output path information.
-   */
-  public void setDirectories(BlazeDirectories directories) {
-    this.directories = directories;
-  }
-
-  protected Path getExternalRepositoryDirectory() {
-    return RepositoryFunction.getExternalRepositoryDirectory(directories);
-  }
-
   public static Path getExternalRepositoryDirectory(BlazeDirectories directories) {
     return directories
         .getOutputBase()
@@ -415,19 +358,74 @@ public abstract class RepositoryFunction {
   }
 
   /**
-   * Gets the base directory repositories should be stored in locally.
+   * For files that are under $OUTPUT_BASE/external, add a dependency on the corresponding rule
+   * so that if the WORKSPACE file changes, the File/DirectoryStateValue will be re-evaluated.
+   *
+   * Note that:
+   * - We don't add a dependency on the parent directory at the package root boundary, so
+   * the only transitive dependencies from files inside the package roots to external files
+   * are through symlinks. So the upwards transitive closure of external files is small.
+   * - The only way other than external repositories for external source files to get into the
+   * skyframe graph in the first place is through symlinks outside the package roots, which we
+   * neither want to encourage nor optimize for since it is not common. So the set of external
+   * files is small.
    */
-  protected Path getOutputBase() {
-    return directories.getOutputBase();
+  public static void addExternalFilesDependencies(
+      RootedPath rootedPath, BlazeDirectories directories, Environment env)
+      throws IOException {
+    Path externalRepoDir = getExternalRepositoryDirectory(directories);
+    PathFragment repositoryPath = rootedPath.asPath().relativeTo(externalRepoDir);
+    if (repositoryPath.segmentCount() == 0) {
+      // We are the top of the repository path (<outputBase>/external), not in an actual external
+      // repository path.
+      return;
+    }
+    String repositoryName = repositoryPath.getSegment(0);
+
+    Rule repositoryRule;
+    try {
+      repositoryRule = RepositoryFunction.getRule(repositoryName, env);
+    } catch (RepositoryFunction.RepositoryNotFoundException ex) {
+      // The repository we are looking for does not exist so we should depend on the whole
+      // WORKSPACE file. In that case, the call to RepositoryFunction#getRule(String, Environment)
+      // already requested all repository functions from the WORKSPACE file from Skyframe as part
+      // of the resolution. Therefore we are safe to ignore that Exception.
+      return;
+    } catch (RepositoryFunction.RepositoryFunctionException ex) {
+      // This should never happen.
+      throw new IllegalStateException(
+          "Repository " + repositoryName + " cannot be resolved for path " + rootedPath, ex);
+    }
+    if (repositoryRule == null) {
+      return;
+    }
+
+    // new_local_repository needs a dependency on the directory that `path` points to, as the
+    // external/repo-name DirStateValue has a logical dependency on that directory that is not
+    // reflected in the SkyFrame tree, since it's not symlinked to it or anything.
+    if (repositoryRule.getRuleClass().equals(NewLocalRepositoryRule.NAME)
+        && repositoryPath.segmentCount() == 1) {
+      PathFragment pathDir = RepositoryFunction.getTargetPath(
+          repositoryRule, directories.getWorkspace());
+      FileSystem fs = directories.getWorkspace().getFileSystem();
+      SkyKey dirKey = DirectoryListingValue.key(
+          RootedPath.toRootedPath(fs.getRootDirectory(), fs.getPath(pathDir)));
+      try {
+        env.getValueOrThrow(
+            dirKey, IOException.class, FileSymlinkException.class,
+            InconsistentFilesystemException.class);
+      } catch (FileSymlinkException | InconsistentFilesystemException e) {
+        throw new IOException(e.getMessage());
+      }
+    }
   }
 
   /**
-   * Gets the directory the WORKSPACE file for the build is in.
+   * Sets up a mapping of environment variables to use.
    */
-  protected Path getWorkspace() {
-    return directories.getWorkspace();
+  public void setClientEnvironment(Map<String, String> clientEnvironment) {
+    this.clientEnvironment = clientEnvironment;
   }
-
 
   /**
    * Returns the RuleDefinition class for this type of repository.

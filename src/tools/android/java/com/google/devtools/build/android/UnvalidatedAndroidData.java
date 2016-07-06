@@ -19,6 +19,7 @@ import com.google.common.collect.ImmutableList;
 import com.android.ide.common.res2.AssetSet;
 import com.android.ide.common.res2.ResourceSet;
 
+import java.io.IOException;
 import java.nio.file.FileSystem;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
@@ -76,8 +77,8 @@ class UnvalidatedAndroidData {
   private final ImmutableList<Path> assetDirs;
   private final ImmutableList<Path> resourceDirs;
 
-  public UnvalidatedAndroidData(ImmutableList<Path> resourceDirs, ImmutableList<Path> assetDirs,
-      Path manifest) {
+  public UnvalidatedAndroidData(
+      ImmutableList<Path> resourceDirs, ImmutableList<Path> assetDirs, Path manifest) {
     this.resourceDirs = resourceDirs;
     this.assetDirs = assetDirs;
     this.manifest = manifest;
@@ -158,6 +159,15 @@ class UnvalidatedAndroidData {
       AssetSet set = new AssetSet("primary:" + assetDir.toString());
       set.addSource(assetDir.toFile());
       assetSets.add(set);
+    }
+  }
+
+  public void walk(final AndroidDataPathWalker pathWalker) throws IOException {
+    for (Path path : resourceDirs) {
+      pathWalker.walkResources(path);
+    }
+    for (Path path : assetDirs) {
+      pathWalker.walkAssets(path);
     }
   }
 }

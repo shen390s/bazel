@@ -64,7 +64,7 @@ import javax.annotation.CheckReturnValue;
 /**
  * An Action representing an arbitrary subprocess to be forked and exec'd.
  */
-public class SpawnAction extends AbstractAction {
+public class SpawnAction extends AbstractAction implements ExecutionInfoSpecifier {
   private static class ExtraActionInfoSupplier<T> {
     private final GeneratedExtension<ExtraActionInfo, T> extension;
     private final T value;
@@ -364,6 +364,7 @@ public class SpawnAction extends AbstractAction {
   /**
    * Returns the out-of-band execution data for this action.
    */
+  @Override
   public Map<String, String> getExecutionInfo() {
     return executionInfo;
   }
@@ -375,18 +376,10 @@ public class SpawnAction extends AbstractAction {
   @Override
   public ResourceSet estimateResourceConsumption(Executor executor) {
     SpawnActionContext context = getContext(executor);
-    if (context.isRemotable(getMnemonic(), isRemotable())) {
+    if (context.willExecuteRemotely(!executionInfo.containsKey("local"))) {
       return ResourceSet.ZERO;
     }
     return resourceSet;
-  }
-
-  /**
-   * Returns true if this can be run remotely.
-   */
-  public final boolean isRemotable() {
-    // TODO(bazel-team): get rid of this method.
-    return !executionInfo.containsKey("local");
   }
 
   /**
@@ -638,6 +631,13 @@ public class SpawnAction extends AbstractAction {
     public Builder addOutputs(Iterable<Artifact> artifacts) {
       Iterables.addAll(outputs, artifacts);
       return this;
+    }
+
+    /**
+     * Checks whether the action produces any outputs
+     */
+    public boolean hasOutputs() {
+      return !outputs.isEmpty();
     }
 
     public Builder setResources(ResourceSet resourceSet) {
@@ -931,7 +931,7 @@ public class SpawnAction extends AbstractAction {
 
     public Builder setMnemonic(String mnemonic) {
       Preconditions.checkArgument(
-          !mnemonic.isEmpty() && CharMatcher.JAVA_LETTER_OR_DIGIT.matchesAllOf(mnemonic),
+          !mnemonic.isEmpty() && CharMatcher.javaLetterOrDigit().matchesAllOf(mnemonic),
           "mnemonic must only contain letters and/or digits, and have non-zero length, was: \"%s\"",
           mnemonic);
       this.mnemonic = mnemonic;

@@ -17,8 +17,8 @@ package com.google.devtools.build.lib.rules.apple;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Multimap;
-import com.google.devtools.build.lib.Constants;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration.DefaultLabelConverter;
+import com.google.devtools.build.lib.analysis.config.BuildConfiguration.LabelConverter;
 import com.google.devtools.build.lib.analysis.config.FragmentOptions;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.common.options.Converters.CommaSeparatedOptionListConverter;
@@ -47,16 +47,45 @@ public class AppleCommandLineOptions extends FragmentOptions {
 
   @Option(
     name = "ios_sdk_version",
-    // TODO(bazel-team): Make this flag optional, and infer SDKROOT based on executor default.
-    defaultValue = DEFAULT_IOS_SDK_VERSION,
+    defaultValue = "null",
     converter = DottedVersionConverter.class,
     category = "build",
     help = "Specifies the version of the iOS SDK to use to build iOS applications."
   )
   public DottedVersion iosSdkVersion;
 
+  @Option(
+    name = "watchos_sdk_version",
+    defaultValue = "null",
+    converter = DottedVersionConverter.class,
+    category = "build",
+    help = "Specifies the version of the WatchOS SDK to use to build WatchOS applications."
+  )
+  public DottedVersion watchOsSdkVersion;
+
+  @Option(
+    name = "tvos_sdk_version",
+    defaultValue = "null",
+    converter = DottedVersionConverter.class,
+    category = "build",
+    help = "Specifies the version of the AppleTVOS SDK to use to build AppleTVOS applications."
+  )
+  public DottedVersion tvOsSdkVersion;
+
+  @Option(
+    name = "macosx_sdk_version",
+    defaultValue = "null",
+    converter = DottedVersionConverter.class,
+    category = "build",
+    help = "Specifies the version of the Mac OS X SDK to use to build Mac OS X applications."
+  )
+  public DottedVersion macOsXSdkVersion;
+
   @VisibleForTesting public static final String DEFAULT_IOS_SDK_VERSION = "8.4";
-  
+  @VisibleForTesting public static final String DEFAULT_WATCHOS_SDK_VERSION = "2.0";
+  @VisibleForTesting public static final String DEFAULT_MACOSX_SDK_VERSION = "10.10";
+  @VisibleForTesting public static final String DEFAULT_APPLETVOS_SDK_VERSION = "1.0";
+
   @Option(name = "ios_cpu",
       defaultValue = DEFAULT_IOS_CPU,
       category = "build",
@@ -70,19 +99,19 @@ public class AppleCommandLineOptions extends FragmentOptions {
       help = "Comma-separated list of architectures to build an ios_application with. The result "
           + "is a universal binary containing all specified architectures.")
   public List<String> iosMultiCpus;
-  
+
   @VisibleForTesting static final String DEFAULT_IOS_CPU = "x86_64";
-  
+
   @Option(name = "default_ios_provisioning_profile",
       defaultValue = "",
       category = "undocumented",
       converter = DefaultProvisioningProfileConverter.class)
   public Label defaultProvisioningProfile;
-  
+
   @Option(name = "xcode_version_config",
-      defaultValue = "",
+      defaultValue = "@bazel_tools" + DEFAULT_XCODE_VERSION_CONFIG_LABEL,
       category = "undocumented",
-      converter = XcodeVersionConfigConverter.class,
+      converter = LabelConverter.class,
       help = "The label of the xcode_config rule to be used for selecting the xcode version "
           + "in the build configuration")
   public Label xcodeVersionConfig;
@@ -91,8 +120,7 @@ public class AppleCommandLineOptions extends FragmentOptions {
    * The default label of the build-wide {@code xcode_config} configuration rule. This can be
    * changed from the default using the {@code xcode_version_config} build flag.
    */
-  static final String DEFAULT_XCODE_VERSION_CONFIG_LABEL =
-      Constants.TOOLS_REPOSITORY + "//tools/objc:host_xcodes";
+  static final String DEFAULT_XCODE_VERSION_CONFIG_LABEL = "//tools/objc:host_xcodes";
 
   /** Converter for --default_ios_provisioning_profile. */
   public static class DefaultProvisioningProfileConverter extends DefaultLabelConverter {
@@ -110,13 +138,6 @@ public class AppleCommandLineOptions extends FragmentOptions {
              + "Values: 'none', 'embedded_markers', 'embedded'.")
   public AppleBitcodeMode appleBitcodeMode;
 
-  /** Converter for {@code --xcode_version_config}. */
-  public static class XcodeVersionConfigConverter extends DefaultLabelConverter {
-    public XcodeVersionConfigConverter() {
-      super(DEFAULT_XCODE_VERSION_CONFIG_LABEL);
-    }
-  }
-  
   private Platform getPlatform() {
     for (String architecture : iosMultiCpus) {
       if (Platform.forIosArch(architecture) == Platform.IOS_DEVICE) {
@@ -125,7 +146,7 @@ public class AppleCommandLineOptions extends FragmentOptions {
     }
     return Platform.forIosArch(iosCpu);
   }
-  
+
   @Override
   public void addAllLabels(Multimap<String, Label> labelMap) {
     if (getPlatform() == Platform.IOS_DEVICE) {
@@ -133,19 +154,19 @@ public class AppleCommandLineOptions extends FragmentOptions {
     }
     labelMap.put("xcode_version_config", xcodeVersionConfig);
   }
-  
+
   /**
    * Represents the Apple Bitcode mode for compilation steps.
-   * 
+   *
    * <p>Bitcode is an intermediate representation of a compiled program. For many platforms,
    * Apple requires app submissions to contain bitcode in order to be uploaded to the app store.
-   * 
+   *
    * <p>This is a build-wide value, as bitcode mode needs to be consistent among a target and
    * its compiled dependencies.
    */
   public enum AppleBitcodeMode {
 
-    /** 
+    /**
      * Do not compile bitcode.
      */
     NONE("none"),
@@ -196,6 +217,10 @@ public class AppleCommandLineOptions extends FragmentOptions {
     // Set options needed in the host configuration.
     host.xcodeVersionConfig = xcodeVersionConfig;
     host.xcodeVersion = xcodeVersion;
+    host.iosSdkVersion = iosSdkVersion;
+    host.watchOsSdkVersion = watchOsSdkVersion;
+    host.tvOsSdkVersion = tvOsSdkVersion;
+    host.macOsXSdkVersion = macOsXSdkVersion;
     host.appleBitcodeMode = appleBitcodeMode;
 
     return host;

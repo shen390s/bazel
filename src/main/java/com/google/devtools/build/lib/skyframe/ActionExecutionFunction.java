@@ -16,6 +16,7 @@ package com.google.devtools.build.lib.skyframe;
 import com.google.common.base.Function;
 import com.google.common.base.Predicates;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
@@ -27,7 +28,6 @@ import com.google.devtools.build.lib.actions.ActionExecutionException;
 import com.google.devtools.build.lib.actions.ActionInputHelper;
 import com.google.devtools.build.lib.actions.AlreadyReportedActionExecutionException;
 import com.google.devtools.build.lib.actions.Artifact;
-import com.google.devtools.build.lib.actions.ArtifactFile;
 import com.google.devtools.build.lib.actions.MissingInputFileException;
 import com.google.devtools.build.lib.actions.NotifyOnActionCacheHit;
 import com.google.devtools.build.lib.actions.PackageRootResolutionException;
@@ -59,6 +59,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Level;
 
 import javax.annotation.Nullable;
@@ -78,11 +79,11 @@ import javax.annotation.Nullable;
  */
 public class ActionExecutionFunction implements SkyFunction, CompletionReceiver {
   private final SkyframeActionExecutor skyframeActionExecutor;
-  private final TimestampGranularityMonitor tsgm;
+  private final AtomicReference<TimestampGranularityMonitor> tsgm;
   private ConcurrentMap<Action, ContinuationState> stateMap;
 
   public ActionExecutionFunction(SkyframeActionExecutor skyframeActionExecutor,
-      TimestampGranularityMonitor tsgm) {
+      AtomicReference<TimestampGranularityMonitor> tsgm) {
     this.skyframeActionExecutor = skyframeActionExecutor;
     this.tsgm = tsgm;
     stateMap = Maps.newConcurrentMap();
@@ -91,6 +92,7 @@ public class ActionExecutionFunction implements SkyFunction, CompletionReceiver 
   @Override
   public SkyValue compute(SkyKey skyKey, Environment env) throws ActionExecutionFunctionException,
       InterruptedException {
+    Preconditions.checkArgument(skyKey.argument() instanceof Action);
     Action action = (Action) skyKey.argument();
     // TODO(bazel-team): Non-volatile NotifyOnActionCacheHit actions perform worse in Skyframe than
     // legacy when they are not at the top of the action graph. In legacy, they are stored
@@ -126,7 +128,7 @@ public class ActionExecutionFunction implements SkyFunction, CompletionReceiver 
       env.getValues(state.allInputs.keysRequested);
       Preconditions.checkState(!env.valuesMissing(), "%s %s", action, state);
     }
-    Pair<Map<Artifact, FileArtifactValue>, Map<Artifact, Collection<ArtifactFile>>> checkedInputs =
+    Pair<Map<Artifact, FileArtifactValue>, Map<Artifact, Collection<Artifact>>> checkedInputs =
         null;
     try {
       // Declare deps on known inputs to action. We do this unconditionally to maintain our
@@ -274,7 +276,7 @@ public class ActionExecutionFunction implements SkyFunction, CompletionReceiver 
             path.getParentDirectory(), "Must pass in files, not root directory");
         Preconditions.checkArgument(!parent.isAbsolute(), path);
         SkyKey depKey =
-            ContainingPackageLookupValue.key(PackageIdentifier.createInDefaultRepo(parent));
+            ContainingPackageLookupValue.key(PackageIdentifier.createInMainRepo(parent));
         depKeys.put(path, depKey);
         keysRequested.add(depKey);
       }
@@ -312,6 +314,15 @@ public class ActionExecutionFunction implements SkyFunction, CompletionReceiver 
       // If some values are missing, return null.
       return env.valuesMissing() ? null : result;
     }
+
+    @Override
+    @Nullable
+    public Map<PathFragment, Root> findPackageRoots(Iterable<PathFragment> execPaths)
+        throws PackageRootResolutionException {
+      // call sites for this implementation of PackageRootResolver shouldn't be passing in
+      // directories.
+      return findPackageRootsForFiles(execPaths);
+    }
   }
 
   private ActionExecutionValue checkCacheAndExecuteIfNeeded(
@@ -325,7 +336,7 @@ public class ActionExecutionFunction implements SkyFunction, CompletionReceiver 
     }
     // This may be recreated if we discover inputs.
     ActionMetadataHandler metadataHandler = new ActionMetadataHandler(state.inputArtifactData,
-        action.getOutputs(), tsgm);
+        action.getOutputs(), tsgm.get());
     long actionStartTime = System.nanoTime();
     // We only need to check the action cache if we haven't done it on a previous run.
     if (!state.hasCheckedActionCache()) {
@@ -336,7 +347,7 @@ public class ActionExecutionFunction implements SkyFunction, CompletionReceiver 
     if (state.token == null) {
       // We got a hit from the action cache -- no need to execute.
       return new ActionExecutionValue(
-          metadataHandler.getOutputArtifactFileData(),
+          metadataHandler.getOutputArtifactData(),
           metadataHandler.getOutputTreeArtifactData(),
           metadataHandler.getAdditionalOutputData());
     }
@@ -367,7 +378,7 @@ public class ActionExecutionFunction implements SkyFunction, CompletionReceiver 
           state.inputArtifactData = inputArtifactData;
           perActionFileCache = new PerActionFileCache(state.inputArtifactData);
           metadataHandler =
-              new ActionMetadataHandler(state.inputArtifactData, action.getOutputs(), tsgm);
+              new ActionMetadataHandler(state.inputArtifactData, action.getOutputs(), tsgm.get());
         }
       }
       actionExecutionContext =
@@ -405,7 +416,7 @@ public class ActionExecutionFunction implements SkyFunction, CompletionReceiver 
           inputArtifactData.putAll(metadataFoundDuringActionExecution);
           state.inputArtifactData = inputArtifactData;
           metadataHandler =
-              new ActionMetadataHandler(state.inputArtifactData, action.getOutputs(), tsgm);
+              new ActionMetadataHandler(state.inputArtifactData, action.getOutputs(), tsgm.get());
         }
       } else if (!metadataFoundDuringActionExecution.isEmpty()) {
         // The action has run and discovered more inputs. This is a bug, probably the result of
@@ -435,7 +446,8 @@ public class ActionExecutionFunction implements SkyFunction, CompletionReceiver 
         ActionExecutionException exception =
             new ActionExecutionException(errorMessage, action, /*catastrophe=*/ false);
         LoggingUtil.logToRemote(Level.SEVERE, errorMessage, exception);
-        throw exception;
+        throw skyframeActionExecutor.processAndThrow(
+            exception, action, actionExecutionContext.getFileOutErr());
       }
     }
     Preconditions.checkState(!env.valuesMissing(), action);
@@ -520,7 +532,7 @@ public class ActionExecutionFunction implements SkyFunction, CompletionReceiver 
    * Declare dependency on all known inputs of action. Throws exception if any are known to be
    * missing. Some inputs may not yet be in the graph, in which case the builder should abort.
    */
-  private Pair<Map<Artifact, FileArtifactValue>, Map<Artifact, Collection<ArtifactFile>>>
+  private Pair<Map<Artifact, FileArtifactValue>, Map<Artifact, Collection<Artifact>>>
   checkInputs(Environment env, Action action,
       Map<SkyKey, ValueOrException2<MissingInputFileException, ActionExecutionException>> inputDeps)
       throws ActionExecutionException {
@@ -535,7 +547,7 @@ public class ActionExecutionFunction implements SkyFunction, CompletionReceiver 
     NestedSetBuilder<Label> rootCauses = NestedSetBuilder.stableOrder();
     Map<Artifact, FileArtifactValue> inputArtifactData =
         new HashMap<>(populateInputData ? inputDeps.size() : 0);
-    Map<Artifact, Collection<ArtifactFile>> expandedArtifacts =
+    Map<Artifact, Collection<Artifact>> expandedArtifacts =
         new HashMap<>(populateInputData ? 128 : 0);
 
     ActionExecutionException firstActionExecutionException = null;
@@ -553,15 +565,17 @@ public class ActionExecutionFunction implements SkyFunction, CompletionReceiver 
             // We have to cache the "digest" of the aggregating value itself,
             // because the action cache checker may want it.
             inputArtifactData.put(input, aggregatingValue.getSelfData());
-            ImmutableList.Builder<ArtifactFile> expansionBuilder = ImmutableList.builder();
+            ImmutableList.Builder<Artifact> expansionBuilder = ImmutableList.builder();
             for (Pair<Artifact, FileArtifactValue> pair : aggregatingValue.getInputs()) {
               expansionBuilder.add(pair.first);
             }
             expandedArtifacts.put(input, expansionBuilder.build());
           } else if (value instanceof TreeArtifactValue) {
             TreeArtifactValue setValue = (TreeArtifactValue) value;
-            expandedArtifacts.put(input, ActionInputHelper.asArtifactFiles(
-                    input, setValue.getChildPaths()));
+            ImmutableSet<Artifact> expandedTreeArtifacts = ImmutableSet.<Artifact>copyOf(
+                ActionInputHelper.asTreeFileArtifacts(input, setValue.getChildPaths()));
+
+            expandedArtifacts.put(input, expandedTreeArtifacts);
             // Again, we cache the "digest" of the value for cache checking.
             inputArtifactData.put(input, setValue.getSelfData());
           } else if (value instanceof FileArtifactValue) {
@@ -683,7 +697,7 @@ public class ActionExecutionFunction implements SkyFunction, CompletionReceiver 
   private static class ContinuationState {
     AllInputs allInputs;
     Map<Artifact, FileArtifactValue> inputArtifactData = null;
-    Map<Artifact, Collection<ArtifactFile>> expandedArtifacts = null;
+    Map<Artifact, Collection<Artifact>> expandedArtifacts = null;
     Token token = null;
     Collection<Artifact> discoveredInputs = null;
     ActionExecutionValue value = null;

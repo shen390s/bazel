@@ -44,7 +44,6 @@ cc_library(
             "-lrt",
         ],
     }),
-    visibility = ["//visibility:public"],
     deps = [
         "//src/main/cpp/util",
         "//src/main/cpp/util:blaze_exit_code",
@@ -72,13 +71,12 @@ cc_binary(
         "blaze_startup_options.cc",
         "blaze_startup_options.h",
         "blaze_startup_options_common.cc",
-        "blaze_util_platform.h",
         "option_processor.cc",
         "option_processor.h",
     ],
     copts = [
         "-Wno-sign-compare",
-        "-DBLAZE_JAVA_CPU=\\\"k8\\\"",
+        "-DBLAZE_JAVA_CPU=\"k8\"",
     ],
     linkopts = select({
         "//src:darwin": [
@@ -90,6 +88,7 @@ cc_binary(
         ],
         "//conditions:default": [
             "-lrt",
+            "-ldl",
         ],
     }),
     visibility = ["//src:__pkg__"],
@@ -99,6 +98,13 @@ cc_binary(
         "//src/main/cpp/util",
         "//src/main/cpp/util:md5",
         "//src/main/cpp/util:strings",
+        "//src/main/protobuf:command_server_cc_proto",
         "//third_party/ijar:zip",
     ],
+)
+
+filegroup(
+    name = "srcs",
+    srcs = glob(["**"]) + ["//src/main/cpp/util:srcs"],
+    visibility = ["//src:__pkg__"],
 )

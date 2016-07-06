@@ -25,14 +25,14 @@
 
 set -eu
 
-MY_LOCATION=${MY_LOCATION:-"$0.runfiles/external/bazel_tools/tools/objc"}
+MY_LOCATION=${MY_LOCATION:-"$0.runfiles/bazel_tools/tools/objc"}
 REALPATH="${MY_LOCATION}/realpath"
 WRAPPER="${MY_LOCATION}/xcrunwrapper.sh"
 
 OUTZIP=$("${REALPATH}" "$1")
 ARCHIVEROOT="$2"
 shift 2
-TEMPDIR=$(mktemp -d -t ibtoolZippingOutput)
+TEMPDIR=$(mktemp -d "${TMPDIR:-/tmp}/ibtoolZippingOutput.XXXXXX")
 trap "rm -rf \"$TEMPDIR\"" EXIT
 
 FULLPATH="$TEMPDIR/$ARCHIVEROOT"

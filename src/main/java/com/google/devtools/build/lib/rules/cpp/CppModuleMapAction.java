@@ -16,12 +16,12 @@ package com.google.devtools.build.lib.rules.cpp;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableList;
+import com.google.devtools.build.lib.actions.ActionExecutionContext;
 import com.google.devtools.build.lib.actions.ActionOwner;
 import com.google.devtools.build.lib.actions.Artifact;
-import com.google.devtools.build.lib.actions.Executor;
 import com.google.devtools.build.lib.actions.ResourceSet;
 import com.google.devtools.build.lib.analysis.actions.AbstractFileWriteAction;
-import com.google.devtools.build.lib.events.EventHandler;
+import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.util.Fingerprint;
 import com.google.devtools.build.lib.vfs.PathFragment;
 
@@ -37,7 +37,8 @@ import java.util.List;
  * Creates C++ module map artifact genfiles. These are then passed to Clang to
  * do dependency checking.
  */
-public class CppModuleMapAction extends AbstractFileWriteAction {
+@Immutable
+public final class CppModuleMapAction extends AbstractFileWriteAction {
 
   private static final String GUID = "4f407081-1951-40c1-befc-d6b4daff5de3";
 
@@ -85,7 +86,7 @@ public class CppModuleMapAction extends AbstractFileWriteAction {
   }
 
   @Override
-  public DeterministicWriter newDeterministicWriter(EventHandler eventHandler, Executor executor)  {
+  public DeterministicWriter newDeterministicWriter(ActionExecutionContext ctx)  {
     return new DeterministicWriter() {
       @Override
       public void writeOutputFile(OutputStream out) throws IOException {
@@ -176,11 +177,11 @@ public class CppModuleMapAction extends AbstractFileWriteAction {
     f.addString(GUID);
     f.addInt(privateHeaders.size());
     for (Artifact artifact : privateHeaders) {
-      f.addPath(artifact.getRootRelativePath());
+      f.addPath(artifact.getExecPath());
     }
     f.addInt(publicHeaders.size());
     for (Artifact artifact : publicHeaders) {
-      f.addPath(artifact.getRootRelativePath());
+      f.addPath(artifact.getExecPath());
     }
     f.addInt(dependencies.size());
     for (CppModuleMap dep : dependencies) {

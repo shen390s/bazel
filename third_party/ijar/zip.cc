@@ -127,10 +127,10 @@ class InputZipFile : public ZipExtractor {
   // not enough, we bail out. We only decompress class files, so they should
   // be smaller than 64K anyway, but we give a little leeway.
   // MAX_BUFFER_SIZE must be bigger than the size of the biggest file in the
-  // ZIP. It is set to 256M here so we can uncompress the Bazel server with
-  // this library.
+  // ZIP. It is set to 2GB here because no one has audited the code for 64-bit
+  // cleanliness.
   static const size_t INITIAL_BUFFER_SIZE = 256 * 1024;  // 256K
-  static const size_t MAX_BUFFER_SIZE = 256 * 1024 * 1024;
+  static const size_t MAX_BUFFER_SIZE = std::numeric_limits<int32_t>::max();
   static const size_t MAX_MAPPED_REGION = 32 * 1024 * 1024;
 
   // These metadata fields are the fields of the ZIP header of the file being
@@ -429,7 +429,8 @@ int InputZipFile::ProcessLocalFileEntry(
     }
   }
 
-  if (p - zipdata_in_ > bytes_unmapped_ + MAX_MAPPED_REGION) {
+  size_t bytes_processed = p - zipdata_in_;
+  if (bytes_processed > bytes_unmapped_ + MAX_MAPPED_REGION) {
     input_file_->Discard(MAX_MAPPED_REGION);
     bytes_unmapped_ += MAX_MAPPED_REGION;
   }
@@ -859,7 +860,8 @@ InputZipFile::InputZipFile(ZipExtractorProcessor *processor,
     : processor(processor), filename_(filename), input_file_(NULL),
       bytes_unmapped_(0) {
   uncompressed_data_allocated_ = INITIAL_BUFFER_SIZE;
-  uncompressed_data_ = new u1[uncompressed_data_allocated_];
+  uncompressed_data_ =
+      reinterpret_cast<u1*>(malloc(uncompressed_data_allocated_));
   errmsg[0] = 0;
 }
 
@@ -898,7 +900,7 @@ bool InputZipFile::Open() {
 }
 
 InputZipFile::~InputZipFile() {
-  delete[](uncompressed_data_);
+  free(uncompressed_data_);
   if (input_file_ != NULL) {
     input_file_->Close();
     delete input_file_;
@@ -1039,6 +1041,7 @@ u1* OutputZipFile::WriteLocalFileHeader(const char* filename, const u4 attr) {
   memcpy(entry->file_name, filename, file_name_length_);
   entry->extra_field_length = 0;
   entry->extra_field = (const u1 *)"";
+  entry->crc32 = 0;
 
   // Output the ZIP local_file_header:
   put_u4le(q, LOCAL_FILE_HEADER_SIGNATURE);
@@ -1177,7 +1180,7 @@ bool OutputZipFile::Open() {
   if (!output_file->Opened()) {
     snprintf(errmsg, sizeof(errmsg), "%s", output_file->Error());
     delete output_file;
-    return NULL;
+    return false;
   }
 
   output_file_ = output_file;

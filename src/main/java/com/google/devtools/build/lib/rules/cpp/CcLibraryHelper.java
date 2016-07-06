@@ -37,6 +37,7 @@ import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.collect.nestedset.Order;
 import com.google.devtools.build.lib.packages.BuildType;
 import com.google.devtools.build.lib.rules.cpp.CcToolchainFeatures.FeatureConfiguration;
+import com.google.devtools.build.lib.rules.cpp.CcToolchainFeatures.Variables.VariablesExtension;
 import com.google.devtools.build.lib.rules.cpp.CppConfiguration.HeadersCheckingMode;
 import com.google.devtools.build.lib.rules.cpp.Link.LinkTargetType;
 import com.google.devtools.build.lib.rules.cpp.LinkerInputs.LibraryToLink;
@@ -69,14 +70,43 @@ import javax.annotation.Nullable;
  * methods.
  */
 public final class CcLibraryHelper {
-  static final FileTypeSet SOURCE_TYPES =
-      FileTypeSet.of(
-          CppFileTypes.CPP_SOURCE,
-          CppFileTypes.CPP_HEADER,
-          CppFileTypes.C_SOURCE,
-          CppFileTypes.ASSEMBLER,
-          CppFileTypes.ASSEMBLER_WITH_C_PREPROCESSOR);
-  
+
+  /**
+   * A group of source file types for builds controlled by CcLibraryHelper.  Determines what
+   * file types CcLibraryHelper considers sources.
+   */
+  public static enum SourceCategory {
+    CC(
+        FileTypeSet.of(
+            CppFileTypes.CPP_SOURCE,
+            CppFileTypes.CPP_HEADER,
+            CppFileTypes.C_SOURCE,
+            CppFileTypes.ASSEMBLER,
+            CppFileTypes.ASSEMBLER_WITH_C_PREPROCESSOR)),
+    CC_AND_OBJC(
+        FileTypeSet.of(
+            CppFileTypes.CPP_SOURCE,
+            CppFileTypes.CPP_HEADER,
+            CppFileTypes.OBJC_SOURCE,
+            CppFileTypes.OBJCPP_SOURCE,
+            CppFileTypes.C_SOURCE,
+            CppFileTypes.ASSEMBLER,
+            CppFileTypes.ASSEMBLER_WITH_C_PREPROCESSOR));
+
+    private final FileTypeSet sourceTypeSet;
+
+    private SourceCategory(FileTypeSet sourceTypeSet) {
+      this.sourceTypeSet = sourceTypeSet;
+    }
+
+    /**
+     * Returns the set of file types that are valid for this catagory.
+     */
+    public FileTypeSet getSourceTypes() {
+      return sourceTypeSet;
+    }
+  }
+
   /** Function for extracting module maps from CppCompilationDependencies. */
   public static final Function<TransitiveInfoCollection, CppModuleMap> CPP_DEPS_TO_MODULES =
     new Function<TransitiveInfoCollection, CppModuleMap>() {
@@ -172,7 +202,8 @@ public final class CcLibraryHelper {
   @Nullable private Pattern nocopts;
   private final List<String> linkopts = new ArrayList<>();
   private final Set<String> defines = new LinkedHashSet<>();
-  private final List<TransitiveInfoCollection> deps = new ArrayList<>();
+  private final List<TransitiveInfoCollection> implementationDeps = new ArrayList<>();
+  private final List<TransitiveInfoCollection> interfaceDeps = new ArrayList<>();
   private final List<Artifact> linkstamps = new ArrayList<>();
   private final List<Artifact> prerequisites = new ArrayList<>();
   private final List<PathFragment> looseIncludeDirs = new ArrayList<>();
@@ -195,17 +226,43 @@ public final class CcLibraryHelper {
   private boolean emitDynamicLibrary = true;
   private boolean checkDepsGenerateCpp = true;
   private boolean emitCompileProviders;
-
+  private SourceCategory sourceCatagory;
+  private List<VariablesExtension> variablesExtensions = new ArrayList<>();
+  
   private final FeatureConfiguration featureConfiguration;
 
-  public CcLibraryHelper(RuleContext ruleContext, CppSemantics semantics,
-      FeatureConfiguration featureConfiguration) {
+  /**
+   * Creates a CcLibraryHelper.
+   *
+   * @param ruleContext  the RuleContext for the rule being built
+   * @param semantics  CppSemantics for the build
+   * @param featureConfiguration  activated features and action configs for the build
+   * @param sourceCatagory  the candidate source types for the build
+   */
+  public CcLibraryHelper(
+      RuleContext ruleContext,
+      CppSemantics semantics,
+      FeatureConfiguration featureConfiguration,
+      SourceCategory sourceCatagory) {
     this.ruleContext = Preconditions.checkNotNull(ruleContext);
     this.configuration = ruleContext.getConfiguration();
     this.semantics = Preconditions.checkNotNull(semantics);
     this.featureConfiguration = Preconditions.checkNotNull(featureConfiguration);
+    this.sourceCatagory = Preconditions.checkNotNull(sourceCatagory);
   }
 
+  /**
+   * Creates a CcLibraryHelper for cpp source files.
+   *
+   * @param ruleContext  the RuleContext for the rule being built
+   * @param semantics  CppSemantics for the build
+   * @param featureConfiguration  activated features and action configs for the build
+   */
+  public CcLibraryHelper(
+      RuleContext ruleContext, CppSemantics semantics, FeatureConfiguration featureConfiguration) {
+    this(ruleContext, semantics, featureConfiguration, SourceCategory.CC);
+  }
+  
   /**
    * Sets fields that overlap for cc_library and cc_binary rules.
    */
@@ -330,7 +387,7 @@ public final class CcLibraryHelper {
   private void addSource(Artifact source, Label label) {
     boolean isHeader = CppFileTypes.CPP_HEADER.matches(source.getExecPath());
     boolean isTextualInclude = CppFileTypes.CPP_TEXTUAL_INCLUDE.matches(source.getExecPath());
-    boolean isCompiledSource = SOURCE_TYPES.matches(source.getExecPathString());
+    boolean isCompiledSource = sourceCatagory.getSourceTypes().matches(source.getExecPathString());
     if (isHeader || isTextualInclude) {
       privateHeaders.add(source);
     }
@@ -459,7 +516,42 @@ public final class CcLibraryHelper {
       Preconditions.checkArgument(dep.getConfiguration() == null
           || configuration.equalsOrIsSupersetOf(dep.getConfiguration()),
           "dep " + dep.getLabel() + " has a different config than " + ruleContext.getLabel());
-      this.deps.add(dep);
+      this.implementationDeps.add(dep);
+      this.interfaceDeps.add(dep);
+    }
+    return this;
+  }
+
+  /**
+   * Similar to @{link addDeps}, but adds the given targets as implementation dependencies.
+   * Implementation dependencies are required to actually build a target, but are not required to
+   * build the target's interface, e.g. header module. Thus, implementation dependencies are always
+   * a superset of interface dependencies. Whatever is required to build the interface is also
+   * required to build the implementation.
+   */
+  public CcLibraryHelper addImplementationDeps(Iterable<? extends TransitiveInfoCollection> deps) {
+    for (TransitiveInfoCollection dep : deps) {
+      Preconditions.checkArgument(
+          dep.getConfiguration() == null
+              || configuration.equalsOrIsSupersetOf(dep.getConfiguration()),
+          "dep " + dep.getLabel() + " has a different config than " + ruleContext.getLabel());
+      this.implementationDeps.add(dep);
+    }
+    return this;
+  }
+
+  /**
+   * Similar to @{link addDeps}, but adds the given targets as interface dependencies. Interface
+   * dependencies are required to actually build a target's interface, but are not required to build
+   * the target itself.
+   */
+  public CcLibraryHelper addInterfaceDeps(Iterable<? extends TransitiveInfoCollection> deps) {
+    for (TransitiveInfoCollection dep : deps) {
+      Preconditions.checkArgument(
+          dep.getConfiguration() == null
+              || configuration.equalsOrIsSupersetOf(dep.getConfiguration()),
+          "dep " + dep.getLabel() + " has a different config than " + ruleContext.getLabel());
+      this.interfaceDeps.add(dep);
     }
     return this;
   }
@@ -528,6 +620,15 @@ public final class CcLibraryHelper {
     return this;
   }
 
+  /**
+   * Adds a variableExtension to template the crosstool.
+   */
+  public CcLibraryHelper addVariableExtension(VariablesExtension variableExtension) {
+    Preconditions.checkNotNull(variableExtension);
+    this.variablesExtensions.add(variableExtension);
+    return this;
+  }
+  
   /**
    * Overrides the path for the generated dynamic library - this should only be called if the
    * dynamic library is an implicit or explicit output of the rule, i.e., if it is accessible by
@@ -673,15 +774,26 @@ public final class CcLibraryHelper {
 
     if (checkDepsGenerateCpp) {
       for (LanguageDependentFragment dep :
-          AnalysisUtils.getProviders(deps, LanguageDependentFragment.class)) {
+          AnalysisUtils.getProviders(implementationDeps, LanguageDependentFragment.class)) {
         LanguageDependentFragment.Checker.depSupportsLanguage(
             ruleContext, dep, CppRuleClasses.LANGUAGE);
       }
     }
 
     CppModel model = initializeCppModel();
-    CppCompilationContext cppCompilationContext = initializeCppCompilationContext(model);
+    CppCompilationContext cppCompilationContext =
+        initializeCppCompilationContext(model, /*forInterface=*/ false);
     model.setContext(cppCompilationContext);
+
+    // If we actually have different interface deps, we need a separate compilation context
+    // for the interface. Otherwise, we can just re-use the normal cppCompilationContext.
+    CppCompilationContext interfaceCompilationContext = cppCompilationContext;
+    // As implemenationDeps is a superset of interfaceDeps, comparing the size proves equality.
+    if (implementationDeps.size() != interfaceDeps.size()) {
+      interfaceCompilationContext = initializeCppCompilationContext(model, /*forInterface=*/ true);
+    }
+    model.setInterfaceContext(interfaceCompilationContext);
+
     boolean compileHeaderModules = featureConfiguration.isEnabled(CppRuleClasses.HEADER_MODULES);
     Preconditions.checkState(
         !compileHeaderModules || cppCompilationContext.getCppModuleMap() != null,
@@ -727,7 +839,8 @@ public final class CcLibraryHelper {
           .build();
     }
 
-    DwoArtifactsCollector dwoArtifacts = DwoArtifactsCollector.transitiveCollector(ccOutputs, deps);
+    DwoArtifactsCollector dwoArtifacts =
+        DwoArtifactsCollector.transitiveCollector(ccOutputs, implementationDeps);
     Runfiles cppStaticRunfiles = collectCppRunfiles(ccLinkingOutputs, true);
     Runfiles cppSharedRunfiles = collectCppRunfiles(ccLinkingOutputs, false);
 
@@ -737,7 +850,7 @@ public final class CcLibraryHelper {
         new LinkedHashMap<>();
     providers.put(CppRunfilesProvider.class,
         new CppRunfilesProvider(cppStaticRunfiles, cppSharedRunfiles));
-    providers.put(CppCompilationContext.class, cppCompilationContext);
+    providers.put(CppCompilationContext.class, interfaceCompilationContext);
     providers.put(CppDebugFileProvider.class, new CppDebugFileProvider(
         dwoArtifacts.getDwoArtifacts(), dwoArtifacts.getPicDwoArtifacts()));
     providers.put(TransitiveLipoInfoProvider.class, collectTransitiveLipoInfo(ccOutputs));
@@ -795,15 +908,17 @@ public final class CcLibraryHelper {
         .setNoCopts(nocopts)
         .setDynamicLibrary(dynamicLibrary)
         .addLinkopts(linkopts)
-        .setFeatureConfiguration(featureConfiguration);
+        .setFeatureConfiguration(featureConfiguration)
+        .addVariablesExtension(variablesExtensions);
   }
 
   /**
    * Create context for cc compile action from generated inputs.
    */
-  private CppCompilationContext initializeCppCompilationContext(CppModel model) {
+  private CppCompilationContext initializeCppCompilationContext(
+      CppModel model, boolean forInterface) {
     CppCompilationContext.Builder contextBuilder =
-        new CppCompilationContext.Builder(ruleContext);
+        new CppCompilationContext.Builder(ruleContext, forInterface);
 
     // Setup the include path; local include directories come before those inherited from deps or
     // from the toolchain; in case of aliasing (same include file found on different entries),
@@ -827,7 +942,8 @@ public final class CcLibraryHelper {
     }
 
     contextBuilder.mergeDependentContexts(
-        AnalysisUtils.getProviders(deps, CppCompilationContext.class));
+        AnalysisUtils.getProviders(
+            forInterface ? interfaceDeps : implementationDeps, CppCompilationContext.class));
     CppHelper.mergeToolchainDependentContext(ruleContext, contextBuilder);
 
     // But defines come after those inherited from deps.
@@ -884,6 +1000,8 @@ public final class CcLibraryHelper {
       if (model.getGeneratesNoPicHeaderModule()) {
         contextBuilder.setHeaderModule(model.getHeaderModule(cppModuleMap.getArtifact()));
       }
+      contextBuilder.setUseHeaderModules(
+          featureConfiguration.isEnabled(CppRuleClasses.USE_HEADER_MODULES));
       if (featureConfiguration.isEnabled(CppRuleClasses.USE_HEADER_MODULES)
           && featureConfiguration.isEnabled(CppRuleClasses.TRANSITIVE_MODULE_MAPS)) {
         contextBuilder.setProvideTransitiveModuleMaps(true);
@@ -898,13 +1016,13 @@ public final class CcLibraryHelper {
    * Creates context for cc compile action from generated inputs.
    */
   public CppCompilationContext initializeCppCompilationContext() {
-    return initializeCppCompilationContext(initializeCppModel());
+    return initializeCppCompilationContext(initializeCppModel(), /*forInterface=*/ false);
   }
 
   private Iterable<CppModuleMap> collectModuleMaps() {
     // Cpp module maps may be null for some rules. We filter the nulls out at the end.
     List<CppModuleMap> result = new ArrayList<>();
-    Iterables.addAll(result, Iterables.transform(deps, CPP_DEPS_TO_MODULES));
+    Iterables.addAll(result, Iterables.transform(interfaceDeps, CPP_DEPS_TO_MODULES));
     if (ruleContext.getRule().getAttributeDefinition(":stl") != null) {
       CppCompilationContext stl =
           ruleContext.getPrerequisite(":stl", Mode.TARGET, CppCompilationContext.class);
@@ -922,7 +1040,7 @@ public final class CcLibraryHelper {
   }
 
   private TransitiveLipoInfoProvider collectTransitiveLipoInfo(CcCompilationOutputs outputs) {
-    if (ruleContext.getFragment(CppConfiguration.class).getFdoSupport().getFdoRoot() == null) {
+    if (CppHelper.getFdoSupport(ruleContext).getFdoRoot() == null) {
       return TransitiveLipoInfoProvider.EMPTY;
     }
     NestedSetBuilder<IncludeScannable> scannableBuilder = NestedSetBuilder.stableOrder();
@@ -936,7 +1054,7 @@ public final class CcLibraryHelper {
     }
 
     for (TransitiveLipoInfoProvider dep :
-        AnalysisUtils.getProviders(deps, TransitiveLipoInfoProvider.class)) {
+        AnalysisUtils.getProviders(implementationDeps, TransitiveLipoInfoProvider.class)) {
       scannableBuilder.addTransitive(dep.getTransitiveIncludeScannables());
     }
 
@@ -949,9 +1067,10 @@ public final class CcLibraryHelper {
 
   private Runfiles collectCppRunfiles(
       CcLinkingOutputs ccLinkingOutputs, boolean linkingStatically) {
-    Runfiles.Builder builder = new Runfiles.Builder(ruleContext.getWorkspaceName());
-    builder.addTargets(deps, RunfilesProvider.DEFAULT_RUNFILES);
-    builder.addTargets(deps, CppRunfilesProvider.runfilesFunction(linkingStatically));
+    Runfiles.Builder builder = new Runfiles.Builder(
+        ruleContext.getWorkspaceName(), ruleContext.getConfiguration().legacyExternalRunfiles());
+    builder.addTargets(implementationDeps, RunfilesProvider.DEFAULT_RUNFILES);
+    builder.addTargets(implementationDeps, CppRunfilesProvider.runfilesFunction(linkingStatically));
     // Add the shared libraries to the runfiles.
     builder.addArtifacts(ccLinkingOutputs.getLibrariesForRunfiles(linkingStatically));
     return builder.build();
@@ -965,7 +1084,7 @@ public final class CcLibraryHelper {
       protected void collect(CcLinkParams.Builder builder, boolean linkingStatically,
           boolean linkShared) {
         builder.addLinkstamps(linkstamps, cppCompilationContext);
-        builder.addTransitiveTargets(deps,
+        builder.addTransitiveTargets(implementationDeps,
             CcLinkParamsProvider.TO_LINK_PARAMS, CcSpecificLinkParamsProvider.TO_LINK_PARAMS);
         if (!neverlink) {
           builder.addLibraries(ccLinkingOutputs.getPreferredLibraries(linkingStatically,
@@ -979,8 +1098,8 @@ public final class CcLibraryHelper {
   private NestedSet<LinkerInput> collectNativeCcLibraries(CcLinkingOutputs ccLinkingOutputs) {
     NestedSetBuilder<LinkerInput> result = NestedSetBuilder.linkOrder();
     result.addAll(ccLinkingOutputs.getDynamicLibraries());
-    for (CcNativeLibraryProvider dep : AnalysisUtils.getProviders(
-        deps, CcNativeLibraryProvider.class)) {
+    for (CcNativeLibraryProvider dep :
+        AnalysisUtils.getProviders(implementationDeps, CcNativeLibraryProvider.class)) {
       result.addTransitive(dep.getTransitiveCcNativeLibraries());
     }
 
@@ -997,7 +1116,7 @@ public final class CcLibraryHelper {
 
     NestedSetBuilder<Artifact> builder = NestedSetBuilder.stableOrder();
     for (CcExecutionDynamicLibrariesProvider dep :
-        AnalysisUtils.getProviders(deps, CcExecutionDynamicLibrariesProvider.class)) {
+        AnalysisUtils.getProviders(implementationDeps, CcExecutionDynamicLibrariesProvider.class)) {
       builder.addTransitive(dep.getExecutionDynamicLibraryArtifacts());
     }
     return builder.isEmpty()

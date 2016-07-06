@@ -17,7 +17,6 @@ package com.google.devtools.build.lib.analysis;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Function;
 import com.google.common.base.Predicate;
-import com.google.common.cache.LoadingCache;
 import com.google.common.collect.ArrayListMultimap;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableListMultimap;
@@ -28,12 +27,11 @@ import com.google.common.collect.ListMultimap;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
 import com.google.common.eventbus.EventBus;
-import com.google.devtools.build.lib.actions.Action;
+import com.google.devtools.build.lib.actions.ActionAnalysisMetadata;
 import com.google.devtools.build.lib.actions.ActionGraph;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.ArtifactFactory;
 import com.google.devtools.build.lib.actions.ArtifactOwner;
-import com.google.devtools.build.lib.actions.PackageRootResolver;
 import com.google.devtools.build.lib.actions.Root;
 import com.google.devtools.build.lib.analysis.ExtraActionArtifactsProvider.ExtraArtifactSet;
 import com.google.devtools.build.lib.analysis.config.BinTools;
@@ -89,7 +87,6 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.ExecutionException;
 import java.util.logging.Logger;
 
 import javax.annotation.Nullable;
@@ -262,10 +259,6 @@ public class BuildView {
     return skyframeExecutor.getLastWorkspaceStatusActionForTesting();
   }
 
-  public TransitiveInfoCollection getGeneratingRule(OutputFileConfiguredTarget target) {
-    return target.getGeneratingRule();
-  }
-
   @Override
   public int hashCode() {
     throw new UnsupportedOperationException();  // avoid nondeterminism
@@ -410,13 +403,6 @@ public class BuildView {
         });
   }
 
-  private void prepareToBuild(BuildConfigurationCollection configurations,
-      PackageRootResolver resolver) throws ViewCreationFailedException {
-    for (BuildConfiguration config : configurations.getAllConfigurations()) {
-      config.prepareToBuild(directories.getExecRoot(), getArtifactFactory(), resolver);
-    }
-  }
-
   @ThreadCompatible
   public AnalysisResult update(
       LoadingResult loadingResult,
@@ -425,8 +411,7 @@ public class BuildView {
       Options viewOptions,
       TopLevelArtifactContext topLevelOptions,
       EventHandler eventHandler,
-      EventBus eventBus,
-      boolean loadingEnabled)
+      EventBus eventBus)
       throws ViewCreationFailedException, InterruptedException {
     LOG.info("Starting analysis");
     pollInterruptedStatus();
@@ -464,21 +449,26 @@ public class BuildView {
           aspectKeys.add(
               AspectValue.createSkylarkAspectKey(
                   targetSpec.getLabel(),
+                  // For invoking top-level aspects, use the top-level configuration for both the
+                  // aspect and the base target while the top-level configuration is untrimmed.
+                  targetSpec.getConfiguration(),
                   targetSpec.getConfiguration(),
                   bzlFile,
                   skylarkFunctionName));
         }
       } else {
-        final Class<? extends ConfiguredNativeAspectFactory> aspectFactoryClass =
-            ruleClassProvider.getAspectFactoryMap().get(aspect)
-                .asSubclass(ConfiguredNativeAspectFactory.class);
+        final NativeAspectClass aspectFactoryClass =
+            ruleClassProvider.getNativeAspectClassMap().get(aspect);
         if (aspectFactoryClass != null) {
           for (ConfiguredTargetKey targetSpec : targetSpecs) {
             aspectKeys.add(
                 AspectValue.createAspectKey(
                     targetSpec.getLabel(),
+                    // For invoking top-level aspects, use the top-level configuration for both the
+                    // aspect and the base target while the top-level configuration is untrimmed.
                     targetSpec.getConfiguration(),
-                    new NativeAspectClass<ConfiguredNativeAspectFactory>(aspectFactoryClass)));
+                    targetSpec.getConfiguration(),
+                    aspectFactoryClass));
           }
         } else {
           throw new ViewCreationFailedException("Aspect '" + aspect + "' is unknown");
@@ -486,13 +476,6 @@ public class BuildView {
       }
     }
 
-    // Configuration of some BuildConfiguration.Fragments may require information about
-    // artifactRoots, so we need to set them before calling prepareToBuild. In that case loading
-    // phase has to be enabled.
-    if (loadingEnabled) {
-      setArtifactRoots(loadingResult.getPackageRoots(), configurations);
-    }
-    prepareToBuild(configurations, new SkyframePackageRootResolver(skyframeExecutor, eventHandler));
     skyframeExecutor.injectWorkspaceStatusData();
     SkyframeAnalysisResult skyframeAnalysisResult;
     try {
@@ -561,12 +544,14 @@ public class BuildView {
     if (coverageReportActionFactory != null) {
       CoverageReportActionsWrapper actionsWrapper;
       actionsWrapper = coverageReportActionFactory.createCoverageReportActionsWrapper(
+          eventHandler,
+          directories,
           allTargetsToTest,
           baselineCoverageArtifacts,
           getArtifactFactory(),
           CoverageReportValue.ARTIFACT_OWNER);
       if (actionsWrapper != null) {
-        ImmutableList <Action> actions = actionsWrapper.getActions();
+        ImmutableList<ActionAnalysisMetadata> actions = actionsWrapper.getActions();
         skyframeExecutor.injectCoverageReportData(actions);
         artifactsToBuild.addAll(actionsWrapper.getCoverageOutputs());
       }
@@ -575,17 +560,19 @@ public class BuildView {
     // Tests. This must come last, so that the exclusive tests are scheduled after everything else.
     scheduleTestsIfRequested(parallelTests, exclusiveTests, topLevelOptions, allTargetsToTest);
 
-    String error = loadingResult.hasLoadingError() || skyframeAnalysisResult.hasLoadingError()
-          ? "execution phase succeeded, but there were loading phase errors"
-          : skyframeAnalysisResult.hasAnalysisError()
-            ? "execution phase succeeded, but not all targets were analyzed"
-            : null;
+    String error = loadingResult.hasTargetPatternError()
+        ? "execution phase successful, but there were errors parsing the target pattern"
+        : loadingResult.hasLoadingError() || skyframeAnalysisResult.hasLoadingError()
+            ? "execution phase succeeded, but there were loading phase errors"
+            : skyframeAnalysisResult.hasAnalysisError()
+                ? "execution phase succeeded, but not all targets were analyzed"
+                : null;
 
     final WalkableGraph graph = skyframeAnalysisResult.getWalkableGraph();
     final ActionGraph actionGraph = new ActionGraph() {
       @Nullable
       @Override
-      public Action getGeneratingAction(Artifact artifact) {
+      public ActionAnalysisMetadata getGeneratingAction(Artifact artifact) {
         ArtifactOwner artifactOwner = artifact.getArtifactOwner();
         if (artifactOwner instanceof ActionLookupValue.ActionLookupKey) {
           SkyKey key = ActionLookupValue.key((ActionLookupValue.ActionLookupKey) artifactOwner);
@@ -744,92 +731,6 @@ public class BuildView {
    */
   public void clearAnalysisCache(Collection<ConfiguredTarget> topLevelTargets) {
     skyframeBuildView.clearAnalysisCache(topLevelTargets);
-  }
-
-  // For ide_build_info
-  public ConfiguredTarget getConfiguredTargetForIdeInfo(
-      EventHandler eventHandler, Label label, BuildConfiguration configuration) {
-    return Iterables.getFirst(
-        skyframeExecutor.getConfiguredTargets(
-            eventHandler,
-            configuration,
-            ImmutableList.of(
-                configuration != null
-                    ? Dependency.withConfiguration(label, configuration)
-                    : Dependency.withNullConfiguration(label)),
-            true),
-        null);
-  }
-
-  public ConfiguredTarget getConfiguredTargetForIdeInfo(
-      EventHandler eventHandler, Target target, BuildConfiguration config) {
-    return getConfiguredTargetForIdeInfo(eventHandler, target.getLabel(), config);
-  }
-
-  public Iterable<ConfiguredTarget> getDirectPrerequisitesForIdeInfo(
-      EventHandler eventHandler, ConfiguredTarget ct, BuildConfigurationCollection configurations)
-          throws InterruptedException {
-    return skyframeExecutor.getConfiguredTargets(
-        eventHandler, ct.getConfiguration(),
-        getDirectPrerequisiteDependenciesForIdeInfo(eventHandler, ct, null, configurations),
-        false);
-  }
-
-  @VisibleForTesting
-  public Iterable<Dependency> getDirectPrerequisiteDependenciesForIdeInfo(
-      final EventHandler eventHandler, ConfiguredTarget ct,
-      @Nullable final LoadingCache<Label, Target> targetCache,
-      BuildConfigurationCollection configurations) throws InterruptedException {
-    if (!(ct.getTarget() instanceof Rule)) {
-      return ImmutableList.of();
-    }
-
-    class SilentDependencyResolver extends DependencyResolver {
-      @Override
-      protected void invalidVisibilityReferenceHook(TargetAndConfiguration node, Label label) {
-        // The error must have been reported already during analysis.
-      }
-
-      @Override
-      protected void invalidPackageGroupReferenceHook(TargetAndConfiguration node, Label label) {
-        // The error must have been reported already during analysis.
-      }
-
-      @Override
-      protected void missingEdgeHook(Target from, Label to, NoSuchThingException e) {
-        // The error must have been reported already during analysis.
-      }
-
-      @Override
-      protected Target getTarget(Target from, Label label, NestedSetBuilder<Label> rootCauses) {
-        if (targetCache == null) {
-          try {
-            return LoadedPackageProvider.getLoadedTarget(
-                skyframeExecutor.getPackageManager(), eventHandler, label);
-          } catch (NoSuchThingException e) {
-            throw new IllegalStateException(e);
-          }
-        }
-
-        try {
-          return targetCache.get(label);
-        } catch (ExecutionException e) {
-          // All lookups should succeed because we should not be looking up any targets in error.
-          throw new IllegalStateException(e);
-        }
-      }
-    }
-
-    DependencyResolver dependencyResolver = new SilentDependencyResolver();
-    TargetAndConfiguration ctgNode =
-        new TargetAndConfiguration(ct.getTarget(), ct.getConfiguration());
-    try {
-      return ImmutableSet.copyOf(dependencyResolver.dependentNodeMap(
-          ctgNode, configurations.getHostConfiguration(), /*aspect=*/ null,
-          getConfigurableAttributeKeysForTesting(eventHandler, ctgNode)).values());
-    } catch (EvalException e) {
-      throw new IllegalStateException(e);
-    }
   }
 
   // For testing

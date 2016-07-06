@@ -24,6 +24,8 @@ import com.google.devtools.build.lib.packages.Rule;
 import com.google.devtools.build.lib.packages.Target;
 import com.google.devtools.build.lib.pkgcache.PathPackageLocator;
 import com.google.devtools.build.lib.skyframe.util.SkyframeExecutorTestUtils;
+import com.google.devtools.build.lib.util.BlazeClock;
+import com.google.devtools.build.lib.util.io.TimestampGranularityMonitor;
 import com.google.devtools.build.skyframe.EvaluationResult;
 import com.google.devtools.build.skyframe.SkyKey;
 
@@ -161,8 +163,9 @@ public class SkylarkFileContentHashTests extends BuildViewTestCase {
             true,
             7,
             "",
-            UUID.randomUUID());
-    SkyKey pkgLookupKey = PackageValue.key(PackageIdentifier.parse(pkg));
+            UUID.randomUUID(),
+            new TimestampGranularityMonitor(BlazeClock.instance()));
+    SkyKey pkgLookupKey = PackageValue.key(PackageIdentifier.parse("@//" + pkg));
     EvaluationResult<PackageValue> result =
         SkyframeExecutorTestUtils.evaluate(
             getSkyframeExecutor(), pkgLookupKey, /*keepGoing=*/ false, reporter);

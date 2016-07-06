@@ -190,7 +190,7 @@ function timeout() {
     :
 }
 
-# Usage: fail <message>
+# Usage: fail <message> [<message> ...]
 # Print failure message with context information, and mark the test as
 # a failure.  The context includes a stacktrace including the longest sequence
 # of calls outside this module.  (We exclude the top and bottom portions of
@@ -198,8 +198,8 @@ function timeout() {
 # $TEST_log.
 function fail() {
     __show_log >&2
-    echo "$TEST_name FAILED: $1." >&2
-    echo "$1" >$TEST_TMPDIR/__fail
+    echo "$TEST_name FAILED:" "$@" "." >&2
+    echo "$@" >$TEST_TMPDIR/__fail
     TEST_passed="false"
     __show_stack
     # Cleanup as we are leaving the subshell now
@@ -348,6 +348,22 @@ function expect_cmd_with_timeout() {
 
     [ "$expected" = "$actual" ] && return 0
     fail "Expected '$expected' within ${timeout}s, was '$actual'"
+    return 1
+}
+
+# Usage: assert_one_of <expected_list>... <actual>
+# Asserts that actual is one of the items in expected_list
+# Example: assert_equals ( "foo", "bar", "baz" ) actualval
+function assert_one_of() {
+    local args=("$@")
+    local last_arg_index=$((${#args[@]} - 1))
+    local actual=${args[last_arg_index]}
+    unset args[last_arg_index]
+    for expected_item in "${args[@]}"; do
+      [ "$expected_item" = "$actual" ] && return 0
+    done;
+
+    fail "Expected one of '$expected_list', was '$actual'"
     return 1
 }
 

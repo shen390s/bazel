@@ -36,16 +36,15 @@ import java.util.Set;
  * command-line flags and options files and provides them via getters.
  */
 public final class OptionsParser {
-  private List<String> javacOpts = new ArrayList<>();
+  private final List<String> javacOpts = new ArrayList<>();
 
   private final Map<String, String> directJarsToTargets = new HashMap<>();
   private final Map<String, String> indirectJarsToTargets = new HashMap<>();
 
   private String strictJavaDeps;
 
-  private String outputDepsFile;
   private String outputDepsProtoFile;
-  private Set<String> depsArtifacts = new HashSet<>();
+  private final Set<String> depsArtifacts = new HashSet<>();
 
   private boolean strictClasspathMode;
 
@@ -122,9 +121,6 @@ public final class OptionsParser {
           }
         case "--strict_java_deps":
           strictJavaDeps = getArgument(argQueue, arg);
-          break;
-        case "--output_deps":
-          outputDepsFile = getArgument(argQueue, arg);
           break;
         case "--output_deps_proto":
           outputDepsProtoFile = getArgument(argQueue, arg);
@@ -316,10 +312,6 @@ public final class OptionsParser {
 
   public String getStrictJavaDeps() {
     return strictJavaDeps;
-  }
-
-  public String getOutputDepsFile() {
-    return outputDepsFile;
   }
 
   public String getOutputDepsProtoFile() {

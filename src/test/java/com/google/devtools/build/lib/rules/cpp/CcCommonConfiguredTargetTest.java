@@ -25,19 +25,21 @@ import static org.junit.Assert.fail;
 import com.google.common.base.Predicate;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
-import com.google.common.eventbus.EventBus;
 import com.google.devtools.build.lib.actions.Action;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.util.ActionsTestUtil;
 import com.google.devtools.build.lib.analysis.AnalysisUtils;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
 import com.google.devtools.build.lib.analysis.OutputGroupProvider;
+import com.google.devtools.build.lib.analysis.config.InvalidConfigurationException;
 import com.google.devtools.build.lib.analysis.util.BuildViewTestCase;
 import com.google.devtools.build.lib.cmdline.PackageIdentifier;
-import com.google.devtools.build.lib.pkgcache.LoadingFailedException;
+import com.google.devtools.build.lib.packages.Target;
 import com.google.devtools.build.lib.testutil.MoreAsserts;
 import com.google.devtools.build.lib.testutil.TestConstants;
 import com.google.devtools.build.lib.util.FileType;
+import com.google.devtools.build.lib.vfs.FileSystemUtils;
+import com.google.devtools.build.lib.vfs.ModifiedFileSet;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.lib.view.config.crosstool.CrosstoolConfig;
 
@@ -468,7 +470,7 @@ public class CcCommonConfiguredTargetTest extends BuildViewTestCase {
         "       deps = [':lib1'],",
         "       alwayslink=1)");
     reporter.removeHandler(failFastHandler);
-    getPackageManager().getPackage(reporter, PackageIdentifier.createInDefaultRepo("cc/common"));
+    getPackageManager().getPackage(reporter, PackageIdentifier.createInMainRepo("cc/common"));
     assertContainsEvent(
         "//cc/common:testlib: no such attribute 'alwayslink'" + " in 'cc_test' rule");
   }
@@ -502,6 +504,96 @@ public class CcCommonConfiguredTargetTest extends BuildViewTestCase {
         "cc_library(name = 'flaky_lib',",
         "   srcs = [ 'ok.cc' ],",
         "   includes = [ '//third_party/procps/proc' ])");
+  }
+
+  @Test
+  public void testCcLibraryUplevelIncludesWarned() throws Exception {
+    checkWarning(
+        "third_party/uplevel",
+        "lib",
+        // message:
+        "in includes attribute of cc_library rule //third_party/uplevel:lib: '../bar' resolves to "
+            + "'third_party/bar' not below the relative path of its package 'third_party/uplevel'. "
+            + "This will be an error in the future",
+        // build file:
+        "licenses(['unencumbered'])",
+        "cc_library(name = 'lib',",
+        "           srcs = ['foo.cc'],",
+        "           includes = ['../bar'])");
+  }
+
+  @Test
+  public void testCcLibraryNonThirdPartyIncludesWarned() throws Exception {
+    checkWarning(
+        "topdir",
+        "lib",
+        // message:
+        "in includes attribute of cc_library rule //topdir:lib: './' resolves to 'topdir' not "
+            + "in 'third_party'. This will be an error in the future",
+        // build file:
+        "cc_library(name = 'lib',",
+        "           srcs = ['foo.cc'],",
+        "           includes = ['./'])");
+  }
+
+  @Test
+  public void testCcLibraryThirdPartyIncludesNotWarned() throws Exception {
+    eventCollector.clear();
+    ConfiguredTarget target =
+        scratchConfiguredTarget(
+            "third_party/pkg",
+            "lib",
+            "licenses(['unencumbered'])",
+            "cc_library(name = 'lib',",
+            "           srcs = ['foo.cc'],",
+            "           includes = ['./'])");
+    assertThat(view.hasErrors(target)).isFalse();
+    assertNoEvents();
+  }
+
+  @Test
+  public void testCcLibraryExternalIncludesNotWarned() throws Exception {
+    eventCollector.clear();
+    FileSystemUtils.appendIsoLatin1(
+        scratch.resolve("WORKSPACE"),
+        "local_repository(",
+        "    name = 'pkg',",
+        "    path = '/foo')");
+    getSkyframeExecutor()
+        .invalidateFilesUnderPathForTesting(
+            eventCollector,
+            new ModifiedFileSet.Builder().modify(new PathFragment("WORKSPACE")).build(),
+            rootDirectory);
+    FileSystemUtils.createDirectoryAndParents(scratch.resolve("/foo/bar"));
+    scratch.file("/foo/WORKSPACE", "workspace(name = 'pkg')");
+    scratch.file(
+        "/foo/bar/BUILD",
+        "cc_library(name = 'lib',",
+        "           srcs = ['foo.cc'],",
+        "           includes = ['./'])");
+    Target target = getTarget("@pkg//bar:lib");
+    ensureTargetsVisited(target.getLabel());
+    assertThat(
+            view.hasErrors(
+                view.getConfiguredTargetForTesting(reporter, target.getLabel(), targetConfig)))
+        .isFalse();
+    assertNoEvents();
+  }
+
+  @Test
+  public void testCcLibraryRootIncludesError() throws Exception {
+    checkError(
+        "third_party/root",
+        "lib",
+        // message:
+        "in includes attribute of cc_library rule //third_party/root:lib: '../..' resolves to the "
+            + "workspace root, which would allow this rule and all of its transitive dependents to "
+            + "include any file in your workspace. Please include only what you need",
+        // build file:
+        "licenses(['unencumbered'])",
+        "cc_library(name = 'lib',",
+        "           srcs = ['foo.cc'],",
+        "           includes = ['../..'])");
   }
 
   @Test
@@ -741,34 +833,31 @@ public class CcCommonConfiguredTargetTest extends BuildViewTestCase {
 
   @Test
   public void testExplicitBadStl() throws Exception {
-    scratch.file("x/BUILD",
-        "cc_binary(name = 'x', srcs = ['x.cc'])");
+    scratch.file("x/BUILD");
 
     reporter.removeHandler(failFastHandler);
     try {
-      useConfiguration("--experimental_stl=//x:blah");
-      update(Arrays.asList("//x:x"), true, 10, false, new EventBus());
+      createConfigurations("--experimental_stl=//x:blah");
       fail("found non-existing target");
-    } catch (LoadingFailedException expected) {
+    } catch (InvalidConfigurationException expected) {
       assertThat(expected.getMessage()).contains("Failed to load required STL target: '//x:blah'");
     }
 
     try {
-      useConfiguration("--experimental_stl=//blah");
-      update(Arrays.asList("//x:x"), true, 10, false, new EventBus());
-      fail("found non-existsing target");
-    } catch (LoadingFailedException expected) {
+      createConfigurations("--experimental_stl=//blah");
+      fail("found non-existing target");
+    } catch (InvalidConfigurationException expected) {
       assertThat(expected.getMessage())
           .contains("Failed to load required STL target: '//blah:blah'");
     }
 
     // Without -k.
     try {
-      useConfiguration("--experimental_stl=//blah");
-      update(Arrays.asList("//x:x"), false, 10, false, new EventBus());
-      fail("found non-existsing target");
-    } catch (LoadingFailedException expected) {
-      assertThat(expected.getMessage()).contains("Loading failed; build aborted");
+      createConfigurations("--experimental_stl=//blah");
+      fail("found non-existing target");
+    } catch (InvalidConfigurationException expected) {
+      assertThat(expected.getMessage())
+          .contains("Failed to load required STL target: '//blah:blah'");
     }
   }
 }

@@ -39,7 +39,6 @@ import com.google.devtools.build.lib.util.Preconditions;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.common.options.EnumConverter;
 
-import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 
@@ -204,9 +203,8 @@ public final class TestActionBuilder {
     if (collectCodeCoverage) {
       // Add instrumented file manifest artifact to the list of inputs. This file will contain
       // exec paths of all source files that should be included into the code coverage output.
-      Collection<Artifact> metadataFiles =
-          ImmutableList.copyOf(instrumentedFiles.getInstrumentationMetadataFiles());
-      inputsBuilder.addTransitive(NestedSetBuilder.wrap(Order.STABLE_ORDER, metadataFiles));
+      NestedSet<Artifact> metadataFiles = instrumentedFiles.getInstrumentationMetadataFiles();
+      inputsBuilder.addTransitive(metadataFiles);
       for (TransitiveInfoCollection dep :
           ruleContext.getPrerequisites(":coverage_support", Mode.HOST)) {
         inputsBuilder.addTransitive(dep.getProvider(FileProvider.class).getFilesToBuild());
@@ -217,8 +215,7 @@ public final class TestActionBuilder {
       }
       Artifact instrumentedFileManifest =
           InstrumentedFileManifestAction.getInstrumentedFileManifest(ruleContext,
-              ImmutableList.copyOf(instrumentedFiles.getInstrumentedFiles()),
-              metadataFiles);
+              instrumentedFiles.getInstrumentedFiles(), metadataFiles);
       executionSettings = new TestTargetExecutionSettings(ruleContext, runfilesSupport,
           executable, instrumentedFileManifest, shards);
       inputsBuilder.add(instrumentedFileManifest);

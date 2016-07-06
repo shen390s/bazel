@@ -16,7 +16,9 @@ package com.google.devtools.build.lib.rules.android;
 import static com.google.devtools.build.lib.packages.Attribute.ConfigurationTransition.HOST;
 import static com.google.devtools.build.lib.packages.Attribute.attr;
 import static com.google.devtools.build.lib.packages.BuildType.LABEL;
+import static com.google.devtools.build.lib.syntax.Type.BOOLEAN;
 import static com.google.devtools.build.lib.syntax.Type.STRING;
+import static com.google.devtools.build.lib.syntax.Type.STRING_DICT;
 import static com.google.devtools.build.lib.syntax.Type.STRING_LIST;
 
 import com.google.devtools.build.lib.analysis.RuleDefinition;
@@ -67,10 +69,24 @@ public final class AndroidBinaryOnlyRule implements RuleDefinition {
 //       invocation will be used to generate apks for release.
 //       <!-- #END_BLAZE_RULE.ATTRIBUTE --> */
         .add(attr("version_name", STRING).undocumented("not ready for production use"))
+//        /* <!-- #BLAZE_RULE(android_binary).ATTRIBUTE(manifest_values) -->
+//        A dictionary of values to be overridden in the manifest. Any instance of ${name} in the
+//        manifest will be replaced with the value corresponding to name in this dictionary.
+//        applicationId, versionCode, versionName, minSdkVersion, targetSdkVersion and
+//        maxSdkVersion will also override the corresponding attributes of the manifest and
+//        uses-sdk tags. packageName will be ignored and will be set from either applicationId if
+//        specified or the package in manifest.
+//        <!-- #END_BLAZE_RULE.ATTRIBUTE --> */
+        .add(attr("manifest_values", STRING_DICT).undocumented("not ready for production use"))
         /* <!-- #BLAZE_RULE(android_binary).ATTRIBUTE(nocompress_extensions) -->
         A list of file extension to leave uncompressed in apk.
         <!-- #END_BLAZE_RULE.ATTRIBUTE --> */
         .add(attr("nocompress_extensions", STRING_LIST))
+        /* <!-- #BLAZE_RULE(android_binary).ATTRIBUTE(crunch_png) -->
+        Do PNG crunching (or not). This is independent of nine-patch processing, which is always
+        done. Currently only supported for local resources (not android_resources).
+        <!-- #END_BLAZE_RULE.ATTRIBUTE --> */
+        .add(attr("crunch_png", BOOLEAN).value(true))
         /* <!-- #BLAZE_RULE(android_binary).ATTRIBUTE(resource_configuration_filters) -->
         A list of resource configuration filters, such 'en' that will limit the resources in the
         apk to only the ones in the 'en' configuration.

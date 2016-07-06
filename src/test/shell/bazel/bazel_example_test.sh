@@ -23,6 +23,9 @@ source $(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/test-setup.sh \
 
 function set_up() {
   copy_examples
+  cat > WORKSPACE <<EOF
+workspace(name = "io_bazel")
+EOF
 }
 
 #
@@ -75,20 +78,6 @@ function test_java_test_with_junitrunner() {
   setup_javatest_support
   local java_native_tests=//examples/java-native/src/test/java/com/example/myproject
   assert_test_ok "${java_native_tests}:custom_with_test_class"
-}
-
-function test_java_test_with_workspace_name() {
-  local java_pkg=examples/java-native/src/main/java/com/example/myproject
-  # Use named workspace and test if we can still execute hello-world
-  bazel clean
-
-  rm -f WORKSPACE
-  cat >WORKSPACE <<'EOF'
-workspace(name = "toto")
-EOF
-
-  assert_build_output ./bazel-bin/${java_pkg}/hello-world ${java_pkg}:hello-world
-  assert_binary_run_from_subdir "bazel-bin/${java_pkg}/hello-world foo" "Hello foo"
 }
 
 function test_genrule_and_genquery() {
@@ -166,14 +155,6 @@ function test_java_test_skylark() {
   assert_build //${javatests}:pass
   assert_test_ok //${javatests}:pass
   assert_test_fails //${javatests}:fail
-}
-
-function test_protobuf() {
-  setup_protoc_support
-  local jar=bazel-bin/examples/proto/libtest_proto.jar
-  assert_build_output $jar //examples/proto:test_proto
-  unzip -v $jar | grep -q 'KeyVal\.class' \
-    || fail "Did not find KeyVal class in proto jar."
 }
 
 run_suite "examples"

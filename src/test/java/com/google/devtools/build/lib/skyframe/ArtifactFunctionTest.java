@@ -28,7 +28,8 @@ import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import com.google.common.testing.EqualsTester;
 import com.google.devtools.build.lib.actions.Action;
-import com.google.devtools.build.lib.actions.Action.MiddlemanType;
+import com.google.devtools.build.lib.actions.ActionAnalysisMetadata;
+import com.google.devtools.build.lib.actions.ActionAnalysisMetadata.MiddlemanType;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.MissingInputFileException;
 import com.google.devtools.build.lib.actions.Root;
@@ -373,7 +374,9 @@ public class ArtifactFunctionTest extends ArtifactFunctionTestCase {
 
   private void setGeneratingActions() {
     if (evaluator.getExistingValueForTesting(OWNER_KEY) == null) {
-      differencer.inject(ImmutableMap.of(OWNER_KEY, new ActionLookupValue(actions)));
+      differencer.inject(ImmutableMap.of(
+          OWNER_KEY,
+          new ActionLookupValue(ImmutableList.<ActionAnalysisMetadata>copyOf(actions))));
     }
   }
 
@@ -397,7 +400,7 @@ public class ArtifactFunctionTest extends ArtifactFunctionTestCase {
       FileArtifactValue value;
       if (action.getActionType() == MiddlemanType.NORMAL) {
         try {
-          FileValue fileValue = ActionMetadataHandler.fileValueFromArtifactFile(output, null, tsgm);
+          FileValue fileValue = ActionMetadataHandler.fileValueFromArtifact(output, null, null);
           artifactData.put(output, fileValue);
           value = FileArtifactValue.create(output, fileValue);
         } catch (IOException e) {

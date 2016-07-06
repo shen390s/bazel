@@ -63,7 +63,7 @@ function test_extra_action() {
   # a program that parses the proto here.
   cat > mypkg/echoer.sh <<EOF
 #!/bin/bash
-if [[ ! -e \$0.runfiles/mypkg/runfile ]]; then
+if [[ ! -e \$0.runfiles/__main__/mypkg/runfile ]]; then
   echo "Runfile not found" >&2
   exit 1
 fi
@@ -231,13 +231,13 @@ genrule(
 EOF
   local old_path="${PATH-}"
   local old_tmpdir="${TMPDIR-}"
-  export PATH=":/bin:/usr/bin:/random/path"
+  export PATH="/bin:/usr/bin:/random/path"
   export TMPDIR="/some/path"
   # batch mode to force reload of the environment
   bazel --batch build //pkg:test || fail "Failed to build //pkg:test"
   export PATH="$old_path"
   export TMPDIR="$old_tmpdir"
-  assert_contains "PATH=:/bin:/usr/bin:/random/path" \
+  assert_contains "PATH=/bin:/usr/bin:/random/path" \
     bazel-genfiles/pkg/test.out
   assert_contains "TMPDIR=/some/path" \
     bazel-genfiles/pkg/test.out
@@ -296,6 +296,81 @@ EOF
   bazel build @r//package:hi >$TEST_log 2>&1 || fail "Should build"
   expect_log bazel-genfiles/external/r/package/a/b
   expect_log bazel-genfiles/external/r/package/c/d
+}
+
+function test_python_with_workspace_name() {
+
+ create_new_workspace
+ cd ${new_workspace_dir}
+ mkdir -p {module_a,module_b}
+ local remote_path="${new_workspace_dir}"
+
+ cat > module_a/BUILD <<EOF
+package(default_visibility = ["//visibility:public"])
+py_library(name = "foo", srcs=["foo.py"])
+EOF
+
+ cat > module_b/BUILD <<EOF
+package(default_visibility = ["//visibility:public"])
+py_library(name = "bar", deps = ["//module_a:foo"], srcs=["bar.py"],)
+py_binary(name = "bar2", deps = ["//module_a:foo"], srcs=["bar2.py"],)
+EOF
+
+ cat > module_a/foo.py <<EOF
+def GetNumber():
+  return 42
+EOF
+
+ cat > module_b/bar.py <<EOF
+from module_a import foo
+def PrintNumber():
+  print "Print the number %d" % foo.GetNumber()
+EOF
+
+ cat > module_b/bar2.py <<EOF
+from module_a import foo
+print "The number is %d" % foo.GetNumber()
+EOF
+
+ cd ${WORKSPACE_DIR}
+ mkdir -p {module1,module2}
+ cat > WORKSPACE <<EOF
+workspace(name = "foobar")
+local_repository(name="remote", path="${remote_path}")
+EOF
+ cat > module1/BUILD <<EOF
+package(default_visibility = ["//visibility:public"])
+py_library(name = "fib", srcs=["fib.py"],)
+EOF
+ cat > module2/BUILD <<EOF
+py_binary(name = "bez",
+  deps = ["@remote//module_a:foo", "@remote//module_b:bar", "//module1:fib"],
+  srcs = ["bez.py"],)
+EOF
+
+cat > module1/fib.py <<EOF
+def Fib(n):
+  if n == 0 or n == 1:
+    return 1
+  else:
+    return Fib(n-1) + Fib(n-2)
+EOF
+
+ cat > module2/bez.py <<EOF
+from remote.module_a import foo
+from remote.module_b import bar
+from module1 import fib
+
+print "The number is %d" % foo.GetNumber()
+bar.PrintNumber()
+print "Fib(10) is %d" % fib.Fib(10)
+EOF
+ bazel run //module2:bez >$TEST_log
+ expect_log "The number is 42"
+ expect_log "Print the number 42"
+ expect_log "Fib(10) is 89"
+ bazel run @remote//module_b:bar2 >$TEST_log
+ expect_log "The number is 42"
 }
 
 run_suite "rules test"

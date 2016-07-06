@@ -39,26 +39,47 @@ using blaze_util::pdie;
 using std::string;
 using std::vector;
 
+static void PrintError(const string& op) {
+    DWORD last_error = ::GetLastError();
+    if (last_error == 0) {
+        return;
+    }
+
+    char* message_buffer;
+    size_t size = FormatMessageA(
+        FORMAT_MESSAGE_ALLOCATE_BUFFER
+            | FORMAT_MESSAGE_FROM_SYSTEM
+            | FORMAT_MESSAGE_IGNORE_INSERTS,
+        NULL,
+        last_error,
+        MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+        (LPSTR) &message_buffer,
+        0,
+        NULL);
+
+    fprintf(stderr, "ERROR: %s: %s (%d)\n",
+            op.c_str(), message_buffer, last_error);
+    LocalFree(message_buffer);
+}
+
 void WarnFilesystemType(const string& output_base) {
 }
 
 string GetSelfPath() {
   char buffer[PATH_MAX] = {};
-  ssize_t bytes = readlink("/proc/self/exe", buffer, sizeof(buffer));
-  if (bytes == sizeof(buffer)) {
-    // symlink contents truncated
-    bytes = -1;
-    errno = ENAMETOOLONG;
+  if (!GetModuleFileName(0, buffer, sizeof(buffer))) {
+    pdie(255, "Error %u getting executable file name\n", GetLastError());
   }
-  if (bytes == -1) {
-    pdie(blaze_exit_code::INTERNAL_ERROR, "error reading /proc/self/exe");
-  }
-  buffer[bytes] = '\0';  // readlink does not NUL-terminate
   return string(buffer);
 }
 
 string GetOutputRoot() {
-  return "/var/tmp";
+  char* tmpdir = getenv("TMPDIR");
+  if (tmpdir == 0 || strlen(tmpdir) == 0) {
+    return "/var/tmp";
+  } else {
+    return string(tmpdir);
+  }
 }
 
 pid_t GetPeerProcessId(int socket) {
@@ -122,29 +143,16 @@ void ReplaceAll(
     pos += with.length();
   }
 }
-}  // namespace
 
-// Replace the current process with the given program in the given working
-// directory, using the given argument vector.
-// This function does not return on success.
-void ExecuteProgram(const string& exe, const vector<string>& args_vector) {
-  if (VerboseLogging()) {
-    string dbg;
-    for (const auto& s : args_vector) {
-      dbg.append(s);
-      dbg.append(" ");
-    }
+// Max command line length is per CreateProcess documentation
+// (https://msdn.microsoft.com/en-us/library/ms682425(VS.85).aspx)
+static const int MAX_CMDLINE_LENGTH = 32768;
 
-    char cwd[PATH_MAX] = {};
-    if (getcwd(cwd, sizeof(cwd)) == NULL) {
-      pdie(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR, "getcwd() failed");
-    }
-
-    fprintf(stderr, "Invoking binary %s in %s:\n  %s\n", exe.c_str(), cwd,
-            dbg.c_str());
-  }
-
-  // Build full command line.
+struct CmdLine {
+  char cmdline[MAX_CMDLINE_LENGTH];
+};
+static void CreateCommandLine(CmdLine* result, const string& exe,
+                              const vector<string>& args_vector) {
   string cmdline;
   bool first = true;
   for (const auto& s : args_vector) {
@@ -177,22 +185,215 @@ void ExecuteProgram(const string& exe, const vector<string>& args_vector) {
     }
   }
 
+  if (cmdline.size() >= MAX_CMDLINE_LENGTH) {
+    pdie(blaze_exit_code::INTERNAL_ERROR,
+         "Command line too long: %s", cmdline.c_str());
+  }
+
   // Copy command line into a mutable buffer.
   // CreateProcess is allowed to mutate its command line argument.
-  // Max command line length is per CreateProcess documentation
-  // (https://msdn.microsoft.com/en-us/library/ms682425(VS.85).aspx)
-  static const int kMaxCmdLineLength = 32768;
-  char actual_line[kMaxCmdLineLength];
-  if (cmdline.length() >= kMaxCmdLineLength) {
-    pdie(255, "Command line too long: %s", cmdline.c_str());
-  }
-  strncpy(actual_line, cmdline.c_str(), kMaxCmdLineLength);
-  // Add trailing '\0' to be sure.
-  actual_line[kMaxCmdLineLength - 1] = '\0';
+  strncpy(result->cmdline, cmdline.c_str(), MAX_CMDLINE_LENGTH - 1);
+  result->cmdline[MAX_CMDLINE_LENGTH - 1] = 0;
+}
 
-  // Execute program.
-  STARTUPINFO startupinfo = {0};
-  PROCESS_INFORMATION pi = {0};
+}  // namespace
+
+string RunProgram(
+    const string& exe, const vector<string>& args_vector) {
+  SECURITY_ATTRIBUTES sa = {0};
+
+  sa.nLength = sizeof(SECURITY_ATTRIBUTES);
+  sa.bInheritHandle = TRUE;
+  sa.lpSecurityDescriptor = NULL;
+
+  HANDLE pipe_read, pipe_write;
+  if (!CreatePipe(&pipe_read, &pipe_write, &sa, 0)) {
+    pdie(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR, "CreatePipe");
+  }
+
+  if (!SetHandleInformation(pipe_read, HANDLE_FLAG_INHERIT, 0)) {
+    pdie(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR, "SetHandleInformation");
+  }
+
+  PROCESS_INFORMATION processInfo = {0};
+  STARTUPINFO startupInfo = {0};
+
+  startupInfo.hStdError = pipe_write;
+  startupInfo.hStdOutput = pipe_write;
+  startupInfo.dwFlags |= STARTF_USESTDHANDLES;
+  CmdLine cmdline;
+  CreateCommandLine(&cmdline, exe, args_vector);
+
+  bool ok = CreateProcess(
+      NULL,           // _In_opt_    LPCTSTR               lpApplicationName,
+      //                 _Inout_opt_ LPTSTR                lpCommandLine,
+      cmdline.cmdline,
+      NULL,           // _In_opt_    LPSECURITY_ATTRIBUTES lpProcessAttributes,
+      NULL,           // _In_opt_    LPSECURITY_ATTRIBUTES lpThreadAttributes,
+      true,           // _In_        BOOL                  bInheritHandles,
+      0,              // _In_        DWORD                 dwCreationFlags,
+      NULL,           // _In_opt_    LPVOID                lpEnvironment,
+      NULL,           // _In_opt_    LPCTSTR               lpCurrentDirectory,
+      &startupInfo,   // _In_        LPSTARTUPINFO         lpStartupInfo,
+      &processInfo);  // _Out_       LPPROCESS_INFORMATION lpProcessInformation
+
+  if (!ok) {
+    pdie(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR, "CreateProcess");
+  }
+
+  CloseHandle(pipe_write);
+  std::string result = "";
+  DWORD bytes_read;
+  CHAR buf[1024];
+
+  for (;;) {
+    ok = ::ReadFile(pipe_read, buf, 1023, &bytes_read, NULL);
+    if (!ok || bytes_read == 0) {
+      break;
+    }
+    buf[bytes_read] = 0;
+    result = result + buf;
+  }
+
+  CloseHandle(pipe_read);
+  CloseHandle(processInfo.hProcess);
+  CloseHandle(processInfo.hThread);
+
+  return result;
+}
+
+// If we pass DETACHED_PROCESS to CreateProcess(), cmd.exe appropriately
+// returns the command prompt when the client terminates. msys2, however, in
+// its infinite wisdom, waits until the *server* terminates and cannot be
+// convinced otherwise.
+//
+// So, we first pretend to be a POSIX daemon so that msys2 knows about our
+// intentions and *then* we call CreateProcess(). Life ain't easy.
+static bool DaemonizeOnWindows() {
+  if (fork() > 0) {
+    // We are the original client process.
+    return true;
+  }
+
+  if (fork() > 0) {
+    // We are the child of the original client process. Terminate so that the
+    // actual server is not a child process of the client.
+    exit(0);
+  }
+
+  setsid();
+  // Contrary to the POSIX version, we are not closing the three standard file
+  // descriptors here. CreateProcess() will take care of that and it's useful
+  // to see the error messages in ExecuteDaemon() on the console of the client.
+  return false;
+}
+
+// Keeping an eye on the server process on Windows is not implemented yet.
+// TODO(lberki): Implement this, because otherwise if we can't start up a server
+// process, the client will hang until it times out.
+class DummyBlazeServerStartup : public BlazeServerStartup {
+ public:
+  DummyBlazeServerStartup() {}
+  virtual ~DummyBlazeServerStartup() {}
+  bool IsStillAlive() override { return true; }
+};
+
+void ExecuteDaemon(const string& exe, const std::vector<string>& args_vector,
+                   const string& daemon_output, const string& server_dir,
+                   BlazeServerStartup** server_startup) {
+  if (DaemonizeOnWindows()) {
+    // We are the client process
+    *server_startup = new DummyBlazeServerStartup();
+    return;
+  }
+
+  SECURITY_ATTRIBUTES sa;
+
+  sa.nLength = sizeof(SECURITY_ATTRIBUTES);
+  sa.bInheritHandle = TRUE;
+  sa.lpSecurityDescriptor = NULL;
+
+  HANDLE output_file;
+
+  if (!CreateFile(
+      daemon_output.c_str(),
+      GENERIC_READ | GENERIC_WRITE,
+      0,
+      &sa,
+      CREATE_ALWAYS,
+      FILE_ATTRIBUTE_NORMAL,
+      NULL)) {
+    pdie(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR, "CreateFile");
+  }
+
+  HANDLE pipe_read, pipe_write;
+  if (!CreatePipe(&pipe_read, &pipe_write, &sa, 0)) {
+    pdie(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR, "CreatePipe");
+  }
+
+  if (!SetHandleInformation(pipe_write, HANDLE_FLAG_INHERIT, 0)) {
+    pdie(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR, "SetHandleInformation");
+  }
+
+  PROCESS_INFORMATION processInfo = {0};
+  STARTUPINFO startupInfo = {0};
+
+  startupInfo.hStdInput = pipe_read;
+  startupInfo.hStdError = output_file;
+  startupInfo.hStdOutput = output_file;
+  startupInfo.dwFlags |= STARTF_USESTDHANDLES;
+  CmdLine cmdline;
+  CreateCommandLine(&cmdline, exe, args_vector);
+
+  // Propagate BAZEL_SH environment variable to a sub-process.
+  // todo(dslomov): More principled approach to propagating
+  // environment variables.
+  SetEnvironmentVariable("BAZEL_SH", getenv("BAZEL_SH"));
+
+  bool ok = CreateProcess(
+      NULL,           // _In_opt_    LPCTSTR               lpApplicationName,
+      //                 _Inout_opt_ LPTSTR                lpCommandLine,
+      cmdline.cmdline,
+      NULL,           // _In_opt_    LPSECURITY_ATTRIBUTES lpProcessAttributes,
+      NULL,           // _In_opt_    LPSECURITY_ATTRIBUTES lpThreadAttributes,
+      TRUE,           // _In_        BOOL                  bInheritHandles,
+      //                 _In_        DWORD                 dwCreationFlags,
+      DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
+      NULL,           // _In_opt_    LPVOID                lpEnvironment,
+      NULL,           // _In_opt_    LPCTSTR               lpCurrentDirectory,
+      &startupInfo,   // _In_        LPSTARTUPINFO         lpStartupInfo,
+      &processInfo);  // _Out_       LPPROCESS_INFORMATION lpProcessInformation
+
+  if (!ok) {
+    pdie(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR, "CreateProcess");
+  }
+
+  CloseHandle(output_file);
+  CloseHandle(pipe_write);
+  CloseHandle(pipe_read);
+
+  string pid_string = ToString(getpid());
+  string pid_file = blaze_util::JoinPath(server_dir, ServerPidFile());
+  if (!WriteFile(pid_string, pid_file)) {
+    // Not a lot we can do if this fails
+    fprintf(stderr, "Cannot write PID file %s\n", pid_file.c_str());
+  }
+
+  CloseHandle(processInfo.hProcess);
+  CloseHandle(processInfo.hThread);
+
+  exit(0);
+}
+
+// Run the given program in the current working directory,
+// using the given argument vector.
+void ExecuteProgram(
+    const string& exe, const vector<string>& args_vector) {
+  CmdLine cmdline;
+  CreateCommandLine(&cmdline, exe, args_vector);
+
+  STARTUPINFO startupInfo = {0};
+  PROCESS_INFORMATION processInfo = {0};
 
   // Propagate BAZEL_SH environment variable to a sub-process.
   // todo(dslomov): More principled approach to propagating
@@ -200,27 +401,27 @@ void ExecuteProgram(const string& exe, const vector<string>& args_vector) {
   SetEnvironmentVariable("BAZEL_SH", getenv("BAZEL_SH"));
 
   bool success = CreateProcess(
-      nullptr,       // _In_opt_    LPCTSTR               lpApplicationName,
-      actual_line,   // _Inout_opt_ LPTSTR                lpCommandLine,
-      nullptr,       // _In_opt_    LPSECURITY_ATTRIBUTES lpProcessAttributes,
-      nullptr,       // _In_opt_    LPSECURITY_ATTRIBUTES lpThreadAttributes,
-      true,          // _In_        BOOL                  bInheritHandles,
-      0,             // _In_        DWORD                 dwCreationFlags,
-      nullptr,       // _In_opt_    LPVOID                lpEnvironment,
-      nullptr,       // _In_opt_    LPCTSTR               lpCurrentDirectory,
-      &startupinfo,  // _In_        LPSTARTUPINFO         lpStartupInfo,
-      &pi);          // _Out_       LPPROCESS_INFORMATION lpProcessInformation
+      NULL,           // _In_opt_    LPCTSTR               lpApplicationName,
+      //                 _Inout_opt_ LPTSTR                lpCommandLine,
+      cmdline.cmdline,
+      NULL,           // _In_opt_    LPSECURITY_ATTRIBUTES lpProcessAttributes,
+      NULL,           // _In_opt_    LPSECURITY_ATTRIBUTES lpThreadAttributes,
+      true,           // _In_        BOOL                  bInheritHandles,
+      0,              // _In_        DWORD                 dwCreationFlags,
+      NULL,           // _In_opt_    LPVOID                lpEnvironment,
+      NULL,           // _In_opt_    LPCTSTR               lpCurrentDirectory,
+      &startupInfo,   // _In_        LPSTARTUPINFO         lpStartupInfo,
+      &processInfo);  // _Out_       LPPROCESS_INFORMATION lpProcessInformation
 
   if (!success) {
-    pdie(255, "Error %u executing: %s\n", GetLastError(), actual_line);
+    pdie(255, "Error %u executing: %s\n", GetLastError(), cmdline);
   }
-  WaitForSingleObject(pi.hProcess, INFINITE);
+  // The output base lock is held while waiting
+  WaitForSingleObject(processInfo.hProcess, INFINITE);
   DWORD exit_code;
-  GetExitCodeProcess(pi.hProcess, &exit_code);
-  CloseHandle(pi.hProcess);
-  CloseHandle(pi.hThread);
-
-  // Emulate execv.
+  GetExitCodeProcess(processInfo.hProcess, &exit_code);
+  CloseHandle(processInfo.hProcess);
+  CloseHandle(processInfo.hThread);
   exit(exit_code);
 }
 
@@ -232,6 +433,204 @@ string ConvertPath(const string& path) {
   string result(wpath);
   free(wpath);
   return result;
+}
+
+string ConvertPathToPosix(const string& win_path) {
+  char* posix_path = static_cast<char*>(cygwin_create_path(
+      CCP_WIN_A_TO_POSIX, static_cast<const void*>(win_path.c_str())));
+  string result(posix_path);
+  free(posix_path);
+  return result;
+}
+
+// Cribbed from ntifs.h, not present in windows.h
+
+#define REPARSE_MOUNTPOINT_HEADER_SIZE   8
+
+typedef struct {
+  DWORD ReparseTag;
+  WORD ReparseDataLength;
+  WORD Reserved;
+  WORD SubstituteNameOffset;
+  WORD SubstituteNameLength;
+  WORD PrintNameOffset;
+  WORD PrintNameLength;
+  WCHAR PathBuffer[ANYSIZE_ARRAY];
+} REPARSE_MOUNTPOINT_DATA_BUFFER, *PREPARSE_MOUNTPOINT_DATA_BUFFER;
+
+HANDLE OpenDirectory(const string& path, bool readWrite) {
+  HANDLE result = ::CreateFile(
+      path.c_str(),
+      readWrite ? (GENERIC_READ | GENERIC_WRITE) : GENERIC_READ,
+      0,
+      NULL,
+      OPEN_EXISTING,
+      FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+      NULL);
+  if (result == INVALID_HANDLE_VALUE) {
+    PrintError("CreateFile(" + path + ")");
+  }
+
+  return result;
+}
+
+bool SymlinkDirectories(const string &posix_target, const string &posix_name) {
+  string target = ConvertPath(posix_target);
+  string name = ConvertPath(posix_name);
+
+  // Junctions are directories, so create one
+  if (!::CreateDirectory(name.c_str(), NULL)) {
+    PrintError("CreateDirectory(" + name + ")");
+    return false;
+  }
+
+  HANDLE directory = OpenDirectory(name, true);
+  if (directory == INVALID_HANDLE_VALUE) {
+    return false;
+  }
+
+  char reparse_buffer_bytes[MAXIMUM_REPARSE_DATA_BUFFER_SIZE];
+  REPARSE_MOUNTPOINT_DATA_BUFFER* reparse_buffer =
+      reinterpret_cast<REPARSE_MOUNTPOINT_DATA_BUFFER *>(reparse_buffer_bytes);
+  memset(reparse_buffer_bytes, 0, MAXIMUM_REPARSE_DATA_BUFFER_SIZE);
+
+  // non-parsed path prefix. Required for junction targets.
+  string prefixed_target = "\\??\\" + target;
+  int prefixed_target_length = ::MultiByteToWideChar(
+      CP_ACP,
+      0,
+      prefixed_target.c_str(),
+      -1,
+      reparse_buffer->PathBuffer,
+      MAX_PATH);
+  if (prefixed_target_length == 0) {
+    PrintError("MultiByteToWideChar(" + prefixed_target + ")");
+    CloseHandle(directory);
+    return false;
+  }
+
+  // In addition to their target, junctions also have another string which
+  // tells which target to show to the user. mklink cuts of the \??\ part, so
+  // that's what we do, too.
+  int target_length = ::MultiByteToWideChar(
+      CP_UTF8,
+      0,
+      target.c_str(),
+      -1,
+      reparse_buffer->PathBuffer + prefixed_target_length,
+      MAX_PATH);
+  if (target_length == 0) {
+    PrintError("MultiByteToWideChar(" + target + ")");
+    CloseHandle(directory);
+    return false;
+  }
+
+  reparse_buffer->ReparseTag = IO_REPARSE_TAG_MOUNT_POINT;
+  reparse_buffer->PrintNameOffset = prefixed_target_length * sizeof(WCHAR);
+  reparse_buffer->PrintNameLength = (target_length - 1) * sizeof(WCHAR);
+  reparse_buffer->SubstituteNameLength =
+      (prefixed_target_length - 1) * sizeof(WCHAR);
+  reparse_buffer->SubstituteNameOffset = 0;
+  reparse_buffer->Reserved = 0;
+  reparse_buffer->ReparseDataLength =
+       reparse_buffer->SubstituteNameLength +
+       reparse_buffer->PrintNameLength + 12;
+
+  DWORD bytes_returned;
+  bool result = ::DeviceIoControl(
+      directory,
+      FSCTL_SET_REPARSE_POINT,
+      reparse_buffer,
+      reparse_buffer->ReparseDataLength + REPARSE_MOUNTPOINT_HEADER_SIZE,
+      NULL,
+      0,
+      &bytes_returned,
+      NULL);
+  if (!result) {
+    PrintError("DeviceIoControl(FSCTL_SET_REPARSE_POINT, " + name + ")");
+  }
+  CloseHandle(directory);
+  return result;
+}
+
+bool ReadDirectorySymlink(const string &posix_name, string* result) {
+  string name = ConvertPath(posix_name);
+  HANDLE directory = OpenDirectory(name, false);
+  if (directory == INVALID_HANDLE_VALUE) {
+    return false;
+  }
+
+  char reparse_buffer_bytes[MAXIMUM_REPARSE_DATA_BUFFER_SIZE];
+  REPARSE_MOUNTPOINT_DATA_BUFFER* reparse_buffer =
+      reinterpret_cast<REPARSE_MOUNTPOINT_DATA_BUFFER *>(reparse_buffer_bytes);
+  memset(reparse_buffer_bytes, 0, MAXIMUM_REPARSE_DATA_BUFFER_SIZE);
+
+  reparse_buffer->ReparseTag = IO_REPARSE_TAG_MOUNT_POINT;
+  DWORD bytes_returned;
+  bool ok = ::DeviceIoControl(
+      directory,
+      FSCTL_GET_REPARSE_POINT,
+      NULL,
+      0,
+      reparse_buffer,
+      MAXIMUM_REPARSE_DATA_BUFFER_SIZE,
+      &bytes_returned,
+      NULL);
+  if (!ok) {
+    PrintError("DeviceIoControl(FSCTL_GET_REPARSE_POINT, " + name + ")");
+  }
+
+  CloseHandle(directory);
+  if (!ok) {
+    return false;
+  }
+
+  char print_name[MAX_PATH];
+  int count = ::WideCharToMultiByte(
+      CP_UTF8,
+      0,
+      reparse_buffer->PathBuffer +
+         (reparse_buffer->PrintNameOffset / sizeof(WCHAR)),
+      reparse_buffer->PrintNameLength,
+      print_name,
+      MAX_PATH,
+      NULL,
+      NULL);
+  if (count == 0) {
+    PrintError("WideCharToMultiByte()");
+    *result = "";
+    return false;
+  } else {
+    *result = ConvertPathToPosix(print_name);
+    return true;
+  }
+}
+
+static bool IsAbsoluteWindowsPath(const string& p) {
+  if (p.size() < 3) {
+    return false;
+  }
+
+  if (p.substr(1, 2) == ":/") {
+    return true;
+  }
+
+  if (p.substr(1, 2) == ":\\") {
+    return true;
+  }
+
+  return false;
+}
+
+bool CompareAbsolutePaths(const string& a, const string& b) {
+  string a_real = IsAbsoluteWindowsPath(a) ? ConvertPathToPosix(a) : a;
+  string b_real = IsAbsoluteWindowsPath(b) ? ConvertPathToPosix(b) : b;
+  return a_real == b_real;
+}
+
+void KillServerProcess(
+    int pid, const string& output_base, const string& install_base) {
+  // Not implemented yet. TerminateProcess should work.
 }
 
 }  // namespace blaze

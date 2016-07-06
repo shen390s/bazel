@@ -20,9 +20,9 @@ import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Sets;
 import com.google.devtools.build.lib.analysis.BlazeDirectories;
 import com.google.devtools.build.lib.analysis.ConfiguredRuleClassProvider;
+import com.google.devtools.build.lib.analysis.RuleDefinition;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.cmdline.LabelSyntaxException;
-import com.google.devtools.build.lib.packages.ConstantRuleVisibility;
 import com.google.devtools.build.lib.packages.NoSuchPackageException;
 import com.google.devtools.build.lib.packages.NoSuchTargetException;
 import com.google.devtools.build.lib.packages.NoSuchThingException;
@@ -41,6 +41,7 @@ import com.google.devtools.build.lib.skyframe.SequencedSkyframeExecutor;
 import com.google.devtools.build.lib.skyframe.SkyValueDirtinessChecker;
 import com.google.devtools.build.lib.skyframe.SkyframeExecutor;
 import com.google.devtools.build.lib.testutil.FoundationTestCase;
+import com.google.devtools.build.lib.testutil.TestConstants;
 import com.google.devtools.build.lib.testutil.TestRuleClassProvider;
 import com.google.devtools.build.lib.util.BlazeClock;
 import com.google.devtools.build.lib.util.io.TimestampGranularityMonitor;
@@ -55,6 +56,7 @@ import org.junit.Before;
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 
@@ -65,27 +67,39 @@ import java.util.UUID;
 public abstract class PackageLoadingTestCase extends FoundationTestCase {
 
   private static final int GLOBBING_THREADS = 7;
-  
+
   protected ConfiguredRuleClassProvider ruleClassProvider;
   protected SkyframeExecutor skyframeExecutor;
 
   @Before
   public final void initializeSkyframeExecutor() throws Exception {
-    ruleClassProvider = TestRuleClassProvider.getRuleClassProvider();
+    List<RuleDefinition> extraRules = getExtraRules();
+    if (!extraRules.isEmpty()) {
+      ConfiguredRuleClassProvider.Builder builder = new ConfiguredRuleClassProvider.Builder();
+      TestRuleClassProvider.addStandardRules(builder);
+      for (RuleDefinition def : extraRules) {
+        builder.addRuleDefinition(def);
+      }
+      ruleClassProvider = builder.build();
+    } else {
+      ruleClassProvider = TestRuleClassProvider.getRuleClassProvider();
+    }
     skyframeExecutor = createSkyframeExecutor(getEnvironmentExtensions(),
-        Preprocessor.Factory.Supplier.NullSupplier.INSTANCE, ConstantRuleVisibility.PUBLIC, "");
+        getPreprocessorFactorySupplier());
     setUpSkyframe(parsePackageCacheOptions());
   }
 
-  protected SkyframeExecutor createSkyframeExecutor(
+  /** Allows subclasses to augment the {@link RuleDefinition}s available in this test. */
+  protected List<RuleDefinition> getExtraRules() {
+    return ImmutableList.of();
+  }
+
+  private SkyframeExecutor createSkyframeExecutor(
       Iterable<EnvironmentExtension> environmentExtensions,
-      Preprocessor.Factory.Supplier preprocessorFactorySupplier,
-      RuleVisibility defaultVisibility,
-      String defaultsPackageContents) {
+      Preprocessor.Factory.Supplier preprocessorFactorySupplier) {
     SkyframeExecutor skyframeExecutor =
         SequencedSkyframeExecutor.create(
             new PackageFactory(ruleClassProvider, environmentExtensions),
-            new TimestampGranularityMonitor(BlazeClock.instance()),
             new BlazeDirectories(outputBase, outputBase, rootDirectory),
             null, /* BinTools */
             null, /* workspaceStatusActionFactory */
@@ -96,10 +110,6 @@ public abstract class PackageLoadingTestCase extends FoundationTestCase {
             ImmutableMap.<SkyFunctionName, SkyFunction>of(),
             ImmutableList.<PrecomputedValue.Injected>of(),
             ImmutableList.<SkyValueDirtinessChecker>of());
-    skyframeExecutor.preparePackageLoading(
-        new PathPackageLocator(outputBase, ImmutableList.of(rootDirectory)),
-        defaultVisibility, true, GLOBBING_THREADS, defaultsPackageContents,
-        UUID.randomUUID());
     return skyframeExecutor;
   }
 
@@ -107,14 +117,29 @@ public abstract class PackageLoadingTestCase extends FoundationTestCase {
     return ImmutableList.<EnvironmentExtension>of();
   }
 
+  protected Preprocessor.Factory.Supplier getPreprocessorFactorySupplier() {
+    return Preprocessor.Factory.Supplier.NullSupplier.INSTANCE;
+  }
+
+  protected void setUpSkyframe(RuleVisibility defaultVisibility, String defaultsPackageContents) {
+    skyframeExecutor.preparePackageLoading(
+        new PathPackageLocator(outputBase, ImmutableList.of(rootDirectory)),
+        defaultVisibility, true, GLOBBING_THREADS, defaultsPackageContents,
+        UUID.randomUUID(), new TimestampGranularityMonitor(BlazeClock.instance()));
+  }
+
   private void setUpSkyframe(PackageCacheOptions packageCacheOptions) {
     PathPackageLocator pkgLocator = PathPackageLocator.create(
         outputBase, packageCacheOptions.packagePath, reporter, rootDirectory, rootDirectory);
-    skyframeExecutor.preparePackageLoading(pkgLocator,
-        packageCacheOptions.defaultVisibility, true,
-        7, ruleClassProvider.getDefaultsPackageContent(),
-        UUID.randomUUID());
-    skyframeExecutor.setDeletedPackages(ImmutableSet.copyOf(packageCacheOptions.deletedPackages));
+    skyframeExecutor.preparePackageLoading(
+        pkgLocator,
+        packageCacheOptions.defaultVisibility,
+        true,
+        GLOBBING_THREADS,
+        ruleClassProvider.getDefaultsPackageContent(TestConstants.TEST_INVOCATION_POLICY),
+        UUID.randomUUID(),
+        new TimestampGranularityMonitor(BlazeClock.instance()));
+    skyframeExecutor.setDeletedPackages(ImmutableSet.copyOf(packageCacheOptions.getDeletedPackages()));
   }
 
   private PackageCacheOptions parsePackageCacheOptions(String... options) throws Exception {
@@ -250,10 +275,5 @@ public abstract class PackageLoadingTestCase extends FoundationTestCase {
   protected void invalidatePackages() throws InterruptedException {
     skyframeExecutor.invalidateFilesUnderPathForTesting(
         reporter, ModifiedFileSet.EVERYTHING_MODIFIED, rootDirectory);
-  }
-
-  protected String getErrorMsgNonEmptyList(String attrName, String ruleType, String ruleName) {
-    return "non empty attribute '" + attrName + "' in '" + ruleType
-        + "' rule '" + ruleName + "' has to have at least one value";
   }
 }

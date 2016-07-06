@@ -86,6 +86,25 @@ public class OptionsParserTest {
     public String baz;
   }
 
+  /** Subclass of an options class. */
+  public static class ExampleBazSubclass extends ExampleBaz {
+
+    @Option(name = "baz_subclass",
+            category = "one",
+            defaultValue = "defaultBazSubclass")
+    public String bazSubclass;
+  }
+
+  /**
+   * Example with empty to null string converter
+   */
+  public static class ExampleBoom extends OptionsBase {
+    @Option(name = "boom",
+            defaultValue = "defaultBoom",
+            converter = EmptyToNullStringConverter.class)
+    public String boom;
+  }
+
   public static class StringConverter implements Converter<String> {
     @Override
     public String convert(String input) {
@@ -94,6 +113,16 @@ public class OptionsParserTest {
     @Override
     public String getTypeDescription() {
       return "a string";
+    }
+  }
+
+  /**
+   * A converter that defaults to null if the input is the empty string
+   */
+  public static class EmptyToNullStringConverter extends StringConverter {
+    @Override
+    public String convert(String input) {
+      return input.isEmpty() ? null : input;
     }
   }
 
@@ -107,6 +136,19 @@ public class OptionsParserTest {
     assertEquals(17, foo.bar);
     ExampleBaz baz = parser.getOptions(ExampleBaz.class);
     assertEquals("oops", baz.baz);
+  }
+
+  @Test
+  public void parseWithOptionsInheritance() throws OptionsParsingException {
+    OptionsParser parser = newOptionsParser(ExampleBazSubclass.class);
+    parser.parse("--baz_subclass=cat", "--baz=dog");
+    ExampleBazSubclass subclassOptions = parser.getOptions(ExampleBazSubclass.class);
+    assertThat(subclassOptions.bazSubclass).isEqualTo("cat");
+    assertThat(subclassOptions.baz).isEqualTo("dog");
+    ExampleBaz options = parser.getOptions(ExampleBaz.class);
+    // This is a test showcasing the lack of functionality for retrieving parsed options at a
+    // superclass type class type. If there's a need for this functionality, we can add it later.
+    assertThat(options).isNull();
   }
 
   @Test
@@ -168,6 +210,17 @@ public class OptionsParserTest {
       assertNotNull(parser.getOptions(ExampleFoo.class));
       assertNotNull(parser.getOptions(ExampleBaz.class));
     }
+  }
+
+  @Test
+  public void parseAndOverrideWithEmptyStringToObtainNullValueInOption()
+      throws OptionsParsingException {
+    OptionsParser parser = newOptionsParser(ExampleBoom.class);
+    // Override --boom value to the empty string
+    parser.parse("--boom=");
+    ExampleBoom boom = parser.getOptions(ExampleBoom.class);
+    // The converted value is intentionally null since boom uses the EmptyToNullStringConverter
+    assertNull(boom.boom);
   }
 
   public static class CategoryTest extends OptionsBase {
@@ -1029,11 +1082,11 @@ public class OptionsParserTest {
     assertEquals(100, result.longval);
   }
 
-  public static class OldNameExample extends OptionsBase { 
+  public static class OldNameExample extends OptionsBase {
     @Option(name = "new_name",
             oldName = "old_name",
             defaultValue = "defaultValue")
-    public String flag; 
+    public String flag;
   }
 
   @Test
@@ -1057,13 +1110,13 @@ public class OptionsParserTest {
     assertEquals(
         Arrays.asList("--new_name=foo"), canonicalize(OldNameExample.class, "--old_name=foo"));
   }
-  
-  public static class OldNameConflictExample extends OptionsBase { 
+
+  public static class OldNameConflictExample extends OptionsBase {
     @Option(name = "new_name",
             oldName = "old_name",
             defaultValue = "defaultValue")
-    public String flag1; 
-    
+    public String flag1;
+
     @Option(name = "old_name",
             defaultValue = "defaultValue")
     public String flag2;
@@ -1078,8 +1131,8 @@ public class OptionsParserTest {
       // expected
     }
   }
-  
-  public static class WrapperOptionExample extends OptionsBase { 
+
+  public static class WrapperOptionExample extends OptionsBase {
     @Option(name = "wrapper",
             defaultValue = "null",
             wrapperOption = true)
@@ -1094,7 +1147,7 @@ public class OptionsParserTest {
     @Option(name = "flag3", defaultValue = "foo")
     public String flag3;
   }
-  
+
   @Test
   public void testWrapperOption() throws OptionsParsingException {
     OptionsParser parser = newOptionsParser(WrapperOptionExample.class);

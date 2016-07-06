@@ -58,6 +58,7 @@ public class AndroidResourcesProcessorBuilder {
   private ResourceContainer primary;
   private ResourceDependencies dependencies;
   private Artifact proguardOut;
+  private Artifact mainDexProguardOut;
   private Artifact rTxtOut;
   private Artifact sourceJarOut;
   private boolean debug = false;
@@ -76,6 +77,9 @@ public class AndroidResourcesProcessorBuilder {
   private Artifact symbolsTxt;
 
   private Artifact manifestOut;
+  private Artifact mergedResourcesOut;
+  private boolean isLibrary;
+  private boolean crunchPng = true;
 
   /**
    * @param ruleContext The RuleContext that was used to create the SpawnAction.Builder.
@@ -106,6 +110,11 @@ public class AndroidResourcesProcessorBuilder {
     return this;
   }
 
+  public AndroidResourcesProcessorBuilder setCrunchPng(boolean crunchPng) {
+    this.crunchPng = crunchPng;
+    return this;
+  }
+
   public AndroidResourcesProcessorBuilder setDensities(List<String> densities) {
     this.densities = densities;
     return this;
@@ -123,6 +132,11 @@ public class AndroidResourcesProcessorBuilder {
 
   public AndroidResourcesProcessorBuilder setProguardOut(Artifact proguardCfg) {
     this.proguardOut = proguardCfg;
+    return this;
+  }
+
+  public AndroidResourcesProcessorBuilder setMainDexProguardOut(Artifact mainDexProguardCfg) {
+    this.mainDexProguardOut = mainDexProguardCfg;
     return this;
   }
 
@@ -153,6 +167,16 @@ public class AndroidResourcesProcessorBuilder {
 
   public AndroidResourcesProcessorBuilder setManifestOut(Artifact manifestOut) {
     this.manifestOut = manifestOut;
+    return this;
+  }
+
+  public AndroidResourcesProcessorBuilder setMergedResourcesOut(Artifact mergedResourcesOut) {
+    this.mergedResourcesOut = mergedResourcesOut;
+    return this;
+  }
+
+  public AndroidResourcesProcessorBuilder setLibrary(boolean isLibrary) {
+    this.isLibrary = isLibrary;
     return this;
   }
 
@@ -257,7 +281,7 @@ public class AndroidResourcesProcessorBuilder {
             Iterables.unmodifiableIterable(
                 Iterables.transform(dependencies.getDirectResources(), RESOURCE_DEP_TO_ARG)));
       }
-      // This flattens the nested set. Since each ResourceContainer needs to be transformed into 
+      // This flattens the nested set. Since each ResourceContainer needs to be transformed into
       // Artifacts, and the NestedSetBuilder.wrap doesn't support lazy Iterator evaluation
       // and SpawnActionBuilder.addInputs evaluates Iterables, it becomes necessary to make the
       // best effort and let it get flattened.
@@ -268,13 +292,13 @@ public class AndroidResourcesProcessorBuilder {
                   .transformAndConcat(RESOURCE_DEP_TO_ARTIFACTS)));
     }
 
+    if (isLibrary) {
+      builder.add("--packageType").add("LIBRARY");
+    }
+
     if (rTxtOut != null) {
       builder.addExecPath("--rOutput", rTxtOut);
       outs.add(rTxtOut);
-      // If R.txt is not null, dependency R.javas will not be regenerated from the R.txt found in
-      // the deps, which means the resource processor needs to be told it is creating a library so
-      // that it will generate the R.txt.
-      builder.add("--packageType").add("LIBRARY");
     }
 
     if (symbolsTxt != null) {
@@ -289,12 +313,22 @@ public class AndroidResourcesProcessorBuilder {
       builder.addExecPath("--proguardOutput", proguardOut);
       outs.add(proguardOut);
     }
-    
+
+    if (mainDexProguardOut != null) {
+      builder.addExecPath("--mainDexProguardOutput", mainDexProguardOut);
+      outs.add(mainDexProguardOut);
+    }
+
     if (manifestOut != null) {
       builder.addExecPath("--manifestOutput", manifestOut);
       outs.add(manifestOut);
     }
-    
+
+    if (mergedResourcesOut != null) {
+      builder.addExecPath("--resourcesOutput", mergedResourcesOut);
+      outs.add(mergedResourcesOut);
+    }
+
     if (apkOut != null) {
       builder.addExecPath("--packagePath", apkOut);
       outs.add(apkOut);
@@ -307,6 +341,9 @@ public class AndroidResourcesProcessorBuilder {
     }
     if (!uncompressedExtensions.isEmpty()) {
       builder.addJoinStrings("--uncompressedExtensions", ",", uncompressedExtensions);
+    }
+    if (!crunchPng) {
+      builder.add("--useAaptCruncher=no");
     }
     if (!assetsToIgnore.isEmpty()) {
       builder.addJoinStrings("--assetsToIgnore", ",", assetsToIgnore);
@@ -342,7 +379,7 @@ public class AndroidResourcesProcessorBuilder {
             .setCommandLine(builder.build())
             .setExecutable(
                 ruleContext.getExecutablePrerequisite("$android_resources_processor", Mode.HOST))
-            .setProgressMessage("Processing resources")
+            .setProgressMessage("Processing Android resources for " + ruleContext.getLabel())
             .setMnemonic("AndroidAapt")
             .build(context));
 
@@ -352,9 +389,9 @@ public class AndroidResourcesProcessorBuilder {
         primary.getRenameManifestPackage(),
         primary.getConstantsInlined(),
         // If there is no apk to be generated, use the apk from the primary resources.
-        // All ResourceContainers have to have an apk, but if a new one is not requested to be built
-        // for this resource processing action (in case of just creating an R.txt or
-        // proguard merging), reuse the primary resource from the dependencies.
+        // All android_binary ResourceContainers have to have an apk, but if a new one is not
+        // requested to be built for this resource processing action (in case of just creating an
+        // R.txt or proguard merging), reuse the primary resource from the dependencies.
         apkOut != null ? apkOut : primary.getApk(),
         manifestOut != null ? manifestOut : primary.getManifest(),
         sourceJarOut,

@@ -21,8 +21,9 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
+import com.google.devtools.build.lib.actions.ActionExecutionContext;
+import com.google.devtools.build.lib.actions.ActionOwner;
 import com.google.devtools.build.lib.actions.Artifact;
-import com.google.devtools.build.lib.actions.Executor;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
 import com.google.devtools.build.lib.analysis.RuleConfiguredTargetBuilder;
 import com.google.devtools.build.lib.analysis.RuleContext;
@@ -37,6 +38,7 @@ import com.google.devtools.build.lib.cmdline.TargetPattern;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.collect.nestedset.Order;
+import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.events.EventHandler;
 import com.google.devtools.build.lib.packages.BuildType;
 import com.google.devtools.build.lib.packages.NoSuchPackageException;
@@ -47,7 +49,8 @@ import com.google.devtools.build.lib.pkgcache.FilteringPolicies;
 import com.google.devtools.build.lib.pkgcache.FilteringPolicy;
 import com.google.devtools.build.lib.pkgcache.PackageProvider;
 import com.google.devtools.build.lib.pkgcache.TargetPatternEvaluator;
-import com.google.devtools.build.lib.query2.AbstractBlazeQueryEnvironment;
+import com.google.devtools.build.lib.query2.BlazeQueryEnvironment;
+import com.google.devtools.build.lib.query2.QueryEnvironmentFactory;
 import com.google.devtools.build.lib.query2.engine.DigraphQueryEvalResult;
 import com.google.devtools.build.lib.query2.engine.QueryEnvironment.QueryFunction;
 import com.google.devtools.build.lib.query2.engine.QueryEnvironment.Setting;
@@ -81,7 +84,6 @@ import java.io.OutputStream;
 import java.io.PrintStream;
 import java.nio.channels.ClosedByInterruptException;
 import java.util.Collection;
-import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -93,8 +95,10 @@ import javax.annotation.Nullable;
  * An implementation of the 'genquery' rule.
  */
 public class GenQuery implements RuleConfiguredTargetFactory {
+  private static final QueryEnvironmentFactory QUERY_ENVIRONMENT_FACTORY =
+      new QueryEnvironmentFactory();
   public static final Precomputed<ImmutableList<OutputFormatter>> QUERY_OUTPUT_FORMATTERS =
-      new Precomputed<>(new SkyKey(SkyFunctions.PRECOMPUTED, "query_output_formatters"));
+      new Precomputed<>(SkyKey.create(SkyFunctions.PRECOMPUTED, "query_output_formatters"));
 
   @Override
   @Nullable
@@ -147,32 +151,15 @@ public class GenQuery implements RuleConfiguredTargetFactory {
     }
 
     ruleContext.registerAction(
-        new AbstractFileWriteAction(
-            ruleContext.getActionOwner(), Collections.<Artifact>emptySet(), outputArtifact, false) {
-          @Override
-          public DeterministicWriter newDeterministicWriter(EventHandler eventHandler,
-                                                            Executor executor) {
-            return new DeterministicWriter() {
-              @Override
-              public void writeOutputFile(OutputStream out) throws IOException {
-                out.write(result);
-              }
-            };
-          }
-
-          @Override
-          protected String computeKey() {
-            Fingerprint f = new Fingerprint();
-            f.addBytes(result);
-            return f.hexDigestAndReset();
-          }
-        });
+        new QueryResultAction(ruleContext.getActionOwner(), outputArtifact, result));
 
     NestedSet<Artifact> filesToBuild = NestedSetBuilder.create(Order.STABLE_ORDER, outputArtifact);
     return new RuleConfiguredTargetBuilder(ruleContext)
         .setFilesToBuild(filesToBuild)
         .add(RunfilesProvider.class, RunfilesProvider.simple(
-            new Runfiles.Builder(ruleContext.getWorkspaceName())
+            new Runfiles.Builder(
+                ruleContext.getWorkspaceName(),
+                ruleContext.getConfiguration().legacyExternalRunfiles())
                 .addTransitiveArtifacts(filesToBuild).build()))
         .build();
   }
@@ -255,6 +242,7 @@ public class GenQuery implements RuleConfiguredTargetFactory {
     return doQuery(queryOptions, packageProvider, labelFilter, evaluator, query, ruleContext);
   }
 
+  @SuppressWarnings("unchecked")
   @Nullable
   private byte[] doQuery(QueryOptions queryOptions, PackageProvider packageProvider,
                          Predicate<Label> labelFilter, TargetPatternEvaluator evaluator,
@@ -285,8 +273,8 @@ public class GenQuery implements RuleConfiguredTargetFactory {
       // All the packages are already loaded at this point, so there is no need
       // to start up many threads. 4 are started up to make good use of multiple
       // cores.
-      queryResult = (DigraphQueryEvalResult<Target>) AbstractBlazeQueryEnvironment
-          .newQueryEnvironment(
+      BlazeQueryEnvironment queryEnvironment = (BlazeQueryEnvironment) QUERY_ENVIRONMENT_FACTORY
+          .create(
               /*transitivePackageLoader=*/null, /*graph=*/null, packageProvider,
               evaluator,
               /*keepGoing=*/false,
@@ -298,7 +286,8 @@ public class GenQuery implements RuleConfiguredTargetFactory {
               getEventHandler(ruleContext),
               settings,
               ImmutableList.<QueryFunction>of(),
-              /*packagePath=*/null).evaluateQuery(query, targets);
+              /*packagePath=*/null);
+      queryResult = (DigraphQueryEvalResult<Target>) queryEnvironment.evaluateQuery(query, targets);
     } catch (SkyframeRestartQueryException e) {
       // Do not emit errors for skyframe restarts. They make output of the ConfiguredTargetFunction
       // inconsistent from run to run, and make detecting legitimate errors more difficult.
@@ -323,6 +312,33 @@ public class GenQuery implements RuleConfiguredTargetFactory {
     printStream.flush();
 
     return outputStream.toByteArray();
+  }
+
+  @Immutable // assuming no other reference to result
+  private static final class QueryResultAction extends AbstractFileWriteAction {
+    private final byte[] result;
+
+    private QueryResultAction(ActionOwner owner, Artifact output, byte[] result) {
+      super(owner, ImmutableList.<Artifact>of(), output, /*makeExecutable=*/false);
+      this.result = result;
+    }
+
+    @Override
+    public DeterministicWriter newDeterministicWriter(ActionExecutionContext ctx) {
+      return new DeterministicWriter() {
+        @Override
+        public void writeOutputFile(OutputStream out) throws IOException {
+          out.write(result);
+        }
+      };
+    }
+
+    @Override
+    protected String computeKey() {
+      Fingerprint f = new Fingerprint();
+      f.addBytes(result);
+      return f.hexDigestAndReset();
+    }
   }
 
   /**

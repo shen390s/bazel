@@ -20,6 +20,7 @@ import com.google.common.base.Function;
 import com.google.common.base.Joiner;
 import com.google.common.base.Predicate;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import com.google.devtools.build.lib.actions.ActionExecutionContext;
 import com.google.devtools.build.lib.actions.ActionExecutionException;
@@ -76,13 +77,12 @@ public class FakeCppCompileAction extends CppCompileAction {
       CppCompilationContext context,
       Class<? extends CppCompileActionContext> actionContext,
       ImmutableList<String> copts,
-      ImmutableList<String> pluginOpts,
       Predicate<String> nocopts,
-      ImmutableList<PathFragment> extraSystemIncludePrefixes,
       @Nullable String fdoBuildStamp,
       RuleContext ruleContext,
       boolean usePic) {
-    super(owner,
+    super(
+        owner,
         features,
         featureConfiguration,
         variables,
@@ -104,9 +104,18 @@ public class FakeCppCompileAction extends CppCompileAction {
         // cc_fake_binary and for the negative compilation tests that depend on
         // the cc_fake_binary, and the runfiles must be determined at analysis
         // time, so they can't depend on the contents of the ".d" file.)
-        CppCompilationContext.disallowUndeclaredHeaders(context), actionContext, copts, pluginOpts,
-        nocopts, extraSystemIncludePrefixes, fdoBuildStamp, VOID_INCLUDE_RESOLVER,
-        ImmutableList.<IncludeScannable>of(), GUID, usePic, ruleContext);
+        CppCompilationContext.disallowUndeclaredHeaders(context),
+        actionContext,
+        copts,
+        nocopts,
+        fdoBuildStamp,
+        VOID_SPECIAL_INPUTS_HANDLER,
+        ImmutableList.<IncludeScannable>of(),
+        GUID,
+        usePic,
+        ImmutableSet.<String>of(),
+        CppCompileAction.CPP_COMPILE,
+        ruleContext);
     this.tempOutputFile = Preconditions.checkNotNull(tempOutputFile);
   }
 

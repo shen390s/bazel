@@ -16,6 +16,7 @@ package com.google.devtools.build.lib.skyframe;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ListMultimap;
+import com.google.devtools.build.lib.actions.ActionAnalysisMetadata;
 import com.google.devtools.build.lib.analysis.CachingAnalysisEnvironment;
 import com.google.devtools.build.lib.analysis.ConfiguredAspect;
 import com.google.devtools.build.lib.analysis.ConfiguredAspectFactory;
@@ -31,6 +32,7 @@ import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.collect.nestedset.Order;
 import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.events.StoredEventHandler;
+import com.google.devtools.build.lib.packages.Aspect;
 import com.google.devtools.build.lib.packages.Attribute;
 import com.google.devtools.build.lib.packages.BuildFileContainsErrorsException;
 import com.google.devtools.build.lib.packages.NativeAspectClass;
@@ -39,9 +41,10 @@ import com.google.devtools.build.lib.packages.NoSuchThingException;
 import com.google.devtools.build.lib.packages.Package;
 import com.google.devtools.build.lib.packages.Rule;
 import com.google.devtools.build.lib.packages.RuleClassProvider;
+import com.google.devtools.build.lib.packages.SkylarkAspect;
 import com.google.devtools.build.lib.packages.SkylarkAspectClass;
 import com.google.devtools.build.lib.packages.Target;
-import com.google.devtools.build.lib.rules.SkylarkRuleClassFunctions.SkylarkAspect;
+import com.google.devtools.build.lib.packages.TargetUtils;
 import com.google.devtools.build.lib.skyframe.AspectValue.AspectKey;
 import com.google.devtools.build.lib.skyframe.ConfiguredTargetFunction.ConfiguredValueCreationException;
 import com.google.devtools.build.lib.skyframe.ConfiguredTargetFunction.DependencyEvaluationException;
@@ -60,6 +63,15 @@ import javax.annotation.Nullable;
 
 /**
  * The Skyframe function that generates aspects.
+ *
+ * {@link AspectFunction} takes a SkyKey containing an {@link AspectKey} [a tuple of
+ * (target label, configurations, aspect class and aspect parameters)],
+ * loads an {@link Aspect} from aspect class and aspect parameters,
+ * gets a {@link ConfiguredTarget} for label and configurations, and then creates
+ * a {@link ConfiguredAspect} for a given {@link AspectKey}.
+ *
+ * See {@link com.google.devtools.build.lib.packages.AspectClass} documentation
+ * for an overview of aspect-related classes
  */
 public final class AspectFunction implements SkyFunction {
   private final BuildViewProvider buildViewProvider;
@@ -87,7 +99,7 @@ public final class AspectFunction implements SkyFunction {
       if (skylarkImportLookupValue == null) {
         return null;
       }
-  
+
       Object skylarkValue = skylarkImportLookupValue.getEnvironmentExtension()
           .get(skylarkValueName);
       if (!(skylarkValue instanceof SkylarkAspect)) {
@@ -110,9 +122,11 @@ public final class AspectFunction implements SkyFunction {
     NestedSetBuilder<Label> transitiveRootCauses = NestedSetBuilder.stableOrder();
     AspectKey key = (AspectKey) skyKey.argument();
     ConfiguredAspectFactory aspectFactory;
-    if (key.getAspectClass() instanceof NativeAspectClass<?>) {
-      aspectFactory =
-          (ConfiguredAspectFactory) ((NativeAspectClass<?>) key.getAspectClass()).newInstance();
+    Aspect aspect;
+    if (key.getAspectClass() instanceof NativeAspectClass) {
+      NativeAspectClass nativeAspectClass = (NativeAspectClass) key.getAspectClass();
+      aspectFactory = (ConfiguredAspectFactory) nativeAspectClass;
+      aspect = Aspect.forNative(nativeAspectClass, key.getParameters());
     } else if (key.getAspectClass() instanceof SkylarkAspectClass) {
       SkylarkAspectClass skylarkAspectClass = (SkylarkAspectClass) key.getAspectClass();
       SkylarkAspect skylarkAspect;
@@ -127,7 +141,11 @@ public final class AspectFunction implements SkyFunction {
         return null;
       }
 
-      aspectFactory = new SkylarkAspectFactory(skylarkAspect.getName(), skylarkAspect);
+      aspectFactory = new SkylarkAspectFactory(skylarkAspect);
+      aspect = Aspect.forSkylark(
+          skylarkAspect.getAspectClass(),
+          skylarkAspect.getDefinition(key.getParameters()),
+          key.getParameters());
     } else {
       throw new IllegalStateException();
     }
@@ -150,6 +168,11 @@ public final class AspectFunction implements SkyFunction {
       throw new AspectFunctionException(e);
     }
 
+    Label aliasLabel = TargetUtils.getAliasTarget(target);
+    if (aliasLabel != null) {
+      return createAliasAspect(env, target, aliasLabel, aspect, key);
+    }
+    
     if (!(target instanceof Rule)) {
       throw new AspectFunctionException(new AspectCreationException(
           "aspects must be attached to rules"));
@@ -159,7 +182,7 @@ public final class AspectFunction implements SkyFunction {
     try {
       configuredTargetValue =
           (ConfiguredTargetValue) env.getValueOrThrow(
-              ConfiguredTargetValue.key(key.getLabel(), key.getConfiguration()),
+              ConfiguredTargetValue.key(key.getLabel(), key.getBaseConfiguration()),
               ConfiguredValueCreationException.class);
     } catch (ConfiguredValueCreationException e) {
       throw new AspectFunctionException(new AspectCreationException(e.getRootCauses()));
@@ -179,12 +202,19 @@ public final class AspectFunction implements SkyFunction {
 
     SkyframeDependencyResolver resolver = view.createDependencyResolver(env);
 
-    TargetAndConfiguration ctgValue =
-        new TargetAndConfiguration(target, key.getConfiguration());
+    // When getting the dependencies of this hybrid aspect+base target, use the aspect's
+    // configuration. The configuration of the aspect will always be a superset of the target's
+    // (dynamic configuration mode: target is part of the aspect's config fragment requirements;
+    // static configuration mode: target is the same configuration as the aspect), so the fragments
+    // required by all dependencies (both those of the aspect and those of the base target)
+    // will be present this way.
+    TargetAndConfiguration originalTargetAndAspectConfiguration =
+        new TargetAndConfiguration(target, key.getAspectConfiguration());
     try {
       // Get the configuration targets that trigger this rule's configurable attributes.
       Set<ConfigMatchingProvider> configConditions = ConfiguredTargetFunction.getConfigConditions(
-          target, env, resolver, ctgValue, transitivePackages, transitiveRootCauses);
+          target, env, resolver, originalTargetAndAspectConfiguration,
+          transitivePackages, transitiveRootCauses);
       if (configConditions == null) {
         // Those targets haven't yet been resolved.
         return null;
@@ -194,11 +224,11 @@ public final class AspectFunction implements SkyFunction {
           ConfiguredTargetFunction.computeDependencies(
               env,
               resolver,
-              ctgValue,
-              key.getAspect(),
+              originalTargetAndAspectConfiguration,
+              aspect,
               configConditions,
               ruleClassProvider,
-              view.getHostConfiguration(ctgValue.getConfiguration()),
+              view.getHostConfiguration(originalTargetAndAspectConfiguration.getConfiguration()),
               transitivePackages,
               transitiveRootCauses);
       if (depValueMap == null) {
@@ -212,8 +242,10 @@ public final class AspectFunction implements SkyFunction {
       return createAspect(
           env,
           key,
+          aspect,
           aspectFactory,
           associatedTarget,
+          key.getAspectConfiguration(),
           configConditions,
           depValueMap,
           transitivePackages);
@@ -233,23 +265,50 @@ public final class AspectFunction implements SkyFunction {
     }
   }
 
+  private SkyValue createAliasAspect(Environment env, Target originalTarget, Label aliasLabel,
+      Aspect aspect, AspectKey originalKey) {
+    SkyKey depKey = AspectValue.key(aliasLabel,
+        originalKey.getAspectConfiguration(),
+        originalKey.getBaseConfiguration(),
+        originalKey.getAspectClass(),
+        originalKey.getParameters());
+    AspectValue real = (AspectValue) env.getValue(depKey);
+    if (env.valuesMissing()) {
+      return null;
+    }
+
+    NestedSet<Package> transitivePackages = NestedSetBuilder.<Package>stableOrder()
+        .addTransitive(real.getTransitivePackages())
+        .add(originalTarget.getPackage())
+        .build();
+    return new AspectValue(
+        originalKey,
+        aspect,
+        originalTarget.getLabel(),
+        originalTarget.getLocation(),
+        ConfiguredAspect.forAlias(real.getConfiguredAspect()),
+        ImmutableList.<ActionAnalysisMetadata>of(),
+        transitivePackages);
+  }
+
   @Nullable
   private AspectValue createAspect(
       Environment env,
       AspectKey key,
+      Aspect aspect,
       ConfiguredAspectFactory aspectFactory,
       RuleConfiguredTarget associatedTarget,
+      BuildConfiguration aspectConfiguration,
       Set<ConfigMatchingProvider> configConditions,
       ListMultimap<Attribute, ConfiguredTarget> directDeps,
       NestedSetBuilder<Package> transitivePackages)
       throws AspectFunctionException, InterruptedException {
 
     SkyframeBuildView view = buildViewProvider.getSkyframeBuildView();
-    BuildConfiguration configuration = associatedTarget.getConfiguration();
 
     StoredEventHandler events = new StoredEventHandler();
     CachingAnalysisEnvironment analysisEnvironment = view.createAnalysisEnvironment(
-        key, false, events, env, configuration);
+        key, false, events, env, aspectConfiguration);
     if (env.valuesMissing()) {
       return null;
     }
@@ -259,10 +318,11 @@ public final class AspectFunction implements SkyFunction {
             analysisEnvironment,
             associatedTarget,
             aspectFactory,
-            key.getAspect(),
+            aspect,
             directDeps,
             configConditions,
-            view.getHostConfiguration(associatedTarget.getConfiguration()));
+            aspectConfiguration,
+            view.getHostConfiguration(aspectConfiguration));
 
     events.replayOn(env.getListener());
     if (events.hasErrors()) {
@@ -282,6 +342,7 @@ public final class AspectFunction implements SkyFunction {
 
     return new AspectValue(
         key,
+        aspect,
         associatedTarget.getLabel(),
         associatedTarget.getTarget().getLocation(),
         configuredAspect,

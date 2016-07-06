@@ -126,7 +126,7 @@ public class ProtoOutputFormatter extends AbstractUnorderedFormatter {
   }
 
   /**
-   * Converts a logical Target object into a Target protobuffer.
+   * Converts a logical {@link Target} object into a {@link Build.Target} protobuffer.
    */
   protected Build.Target toTargetProtoBuffer(Target target)
       throws InterruptedException {
@@ -181,10 +181,10 @@ public class ProtoOutputFormatter extends AbstractUnorderedFormatter {
       // Add information about additional attributes from aspects.
       for (Entry<Attribute, Collection<Label>> entry : aspectsDependencies.asMap().entrySet()) {
         Attribute attribute = entry.getKey();
-        if (!includeAttribute(rule, attribute)) {
+        Collection<Label> labels = entry.getValue();
+        if (!includeAspectAttribute(attribute, labels)) {
           continue;
         }
-        Collection<Label> labels = entry.getValue();
         Object attributeValue = getAspectAttributeValue(attribute, labels);
         Build.Attribute serializedAttribute =
             AttributeSerializer.getAttributeProto(
@@ -342,6 +342,11 @@ public class ProtoOutputFormatter extends AbstractUnorderedFormatter {
 
   /** Filter out some attributes */
   protected boolean includeAttribute(Rule rule, Attribute attr) {
+    return true;
+  }
+
+  /** Allow filtering of aspect attributes. */
+  protected boolean includeAspectAttribute(Attribute attr, Collection<Label> value) {
     return true;
   }
 

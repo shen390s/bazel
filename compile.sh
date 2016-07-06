@@ -24,6 +24,11 @@ set -o errexit
 
 cd "$(dirname "$0")"
 
+# Set the default verbose mode in buildenv.sh so that we do not display command
+# output unless there is a failure.  We do this conditionally to offer the user
+# a chance of overriding this in case they want to do so.
+: ${VERBOSE:=no}
+
 source scripts/bootstrap/buildenv.sh
 
 function usage() {
@@ -78,7 +83,7 @@ fi
 if [ "${EMBED_LABEL-x}" = "x" ]; then
   # Add a default label when unspecified
   git_sha1=$(git_sha1)
-  EMBED_LABEL="head (@${git_sha1:-non-git})"
+  EMBED_LABEL="$(get_last_version) (@${git_sha1:-non-git})"
 fi
 
 if [[ $PLATFORM == "darwin" ]] && \
@@ -136,25 +141,25 @@ if [ $DO_TESTS ]; then
   fi
 
   [ -n "$JAVAC_VERSION" ] || get_java_version
-  if [[ ! "${BAZEL_TEST_FILTERS-}" =~ "-jdk8" ]] \
-      && [ "8" -gt ${JAVAC_VERSION#*.} ]; then
-    display "$WARNING Your version of Java is lower than 1.8!"
-    display "$WARNING Deactivating Java 8 tests, please use a JDK 8 to fully"
-    display "$WARNING test Bazel."
-    if [ -n "${BAZEL_TEST_FILTERS-}" ]; then
-      BAZEL_TEST_FILTERS="${BAZEL_TEST_FILTERS},-jdk8"
-    else
-      BAZEL_TEST_FILTERS="-jdk8"
+  if [[ ! "${BAZEL_TEST_FILTERS-}" =~ "-jdk8" ]]; then
+    if [ "8" -gt ${JAVAC_VERSION#*.} ] || [ "${JAVA_VERSION}" = "1.7" ]; then
+      display "$WARNING Your version of Java is lower than 1.8!"
+      display "$WARNING Deactivating Java 8 tests, please use a JDK 8 to fully"
+      display "$WARNING test Bazel."
+      if [ -n "${BAZEL_TEST_FILTERS-}" ]; then
+        BAZEL_TEST_FILTERS="${BAZEL_TEST_FILTERS},-jdk8"
+      else
+        BAZEL_TEST_FILTERS="-jdk8"
+      fi
     fi
   fi
   $BAZEL --bazelrc=${BAZELRC} --nomaster_bazelrc test \
       --test_tag_filters="${BAZEL_TEST_FILTERS-}" \
       --build_tests_only \
       --nolegacy_bazel_java_test \
+      --define JAVA_VERSION=${JAVA_VERSION} \
       ${EXTRA_BAZEL_ARGS} \
-      --javacopt="-source ${JAVA_VERSION} -target ${JAVA_VERSION}" \
       -k --test_output=errors //src/... //third_party/ijar/... //scripts/... \
-      //tools/build_defs/scala/test/... \
       || fail "Tests failed"
 fi
 

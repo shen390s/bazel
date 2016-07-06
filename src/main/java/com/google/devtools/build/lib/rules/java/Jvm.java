@@ -15,7 +15,6 @@
 package com.google.devtools.build.lib.rules.java;
 
 import com.google.common.collect.ImmutableMap.Builder;
-import com.google.common.collect.Multimap;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
@@ -40,6 +39,10 @@ public final class Jvm extends BuildConfiguration.Fragment {
   private final PathFragment jar;
   private final PathFragment java;
 
+  private static final String BIN_JAVAC = "bin/javac" + OsUtils.executableExtension();
+  private static final String BIN_JAR = "bin/jar" + OsUtils.executableExtension();
+  private static final String BIN_JAVA = "bin/java" + OsUtils.executableExtension();
+
   /**
    * Creates a Jvm instance. Either the {@code javaHome} parameter is absolute,
    * or the {@code jvmLabel} parameter must be non-null. This restriction might
@@ -49,16 +52,9 @@ public final class Jvm extends BuildConfiguration.Fragment {
     Preconditions.checkArgument(javaHome.isAbsolute() ^ (jvmLabel != null));
     this.javaHome = javaHome;
     this.jvmLabel = jvmLabel;
-    this.javac = getJavaHome().getRelative("bin/javac" + OsUtils.executableExtension());
-    this.jar = getJavaHome().getRelative("bin/jar" + OsUtils.executableExtension());
-    this.java = getJavaHome().getRelative("bin/java" + OsUtils.executableExtension());
-  }
-
-  @Override
-  public void addImplicitLabels(Multimap<String, Label> implicitLabels) {
-    if (jvmLabel != null) {
-      implicitLabels.put("Jvm", jvmLabel);
-    }
+    this.javac = getJavaHome().getRelative(BIN_JAVAC);
+    this.jar = getJavaHome().getRelative(BIN_JAR);
+    this.java = getJavaHome().getRelative(BIN_JAVA);
   }
 
   /**
@@ -101,6 +97,17 @@ public final class Jvm extends BuildConfiguration.Fragment {
    */
   public Label getJvmLabel() {
     return jvmLabel;
+  }
+
+  /**
+   * If possible, resolves java relative to the jvmLabel's repository. Otherwise, returns the
+   * same thing as getJavaExecutable().
+   */
+  public PathFragment getRunfilesJavaExecutable() {
+    if (jvmLabel == null || jvmLabel.getPackageIdentifier().getRepository().isMain()) {
+      return getJavaExecutable();
+    }
+    return jvmLabel.getPackageIdentifier().getRepository().getRunfilesPath().getRelative(BIN_JAVA);
   }
 
   @Override

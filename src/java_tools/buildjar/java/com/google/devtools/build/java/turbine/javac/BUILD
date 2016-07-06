@@ -65,6 +65,7 @@ java_library(
     name = "javac_turbine_java_compiler",
     srcs = ["JavacTurbineJavaCompiler.java"],
     deps = [
+        ":javac_turbine_compile_request",
         ":tree_pruner",
         "//src/java_tools/buildjar/java/com/google/devtools/build/buildjar/javac/plugins:dependency",
         "//third_party:jsr305",
@@ -98,4 +99,10 @@ java_library(
         "//third_party:jsr305",
         "//third_party/java/jdk/langtools:javac",
     ],
+)
+
+filegroup(
+    name = "srcs",
+    srcs = glob(["**"]),
+    visibility = ["//src/java_tools/buildjar/java/com/google/devtools/build/java/turbine:__pkg__"],
 )

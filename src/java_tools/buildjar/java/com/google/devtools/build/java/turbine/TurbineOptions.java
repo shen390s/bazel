@@ -19,6 +19,7 @@ import static com.google.common.base.Preconditions.checkNotNull;
 import com.google.common.base.Optional;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 
 import javax.annotation.Nullable;
 
@@ -30,16 +31,16 @@ public class TurbineOptions {
   private final ImmutableList<String> bootClassPath;
   private final ImmutableList<String> sources;
   private final ImmutableList<String> processorPath;
-  private final ImmutableList<String> processors;
+  private final ImmutableSet<String> processors;
+  private final ImmutableSet<String> blacklistedProcessors;
   private final String tempDir;
   private final ImmutableList<String> sourceJars;
   private final Optional<String> outputDeps;
   private final ImmutableMap<String, String> directJarsToTargets;
   private final ImmutableMap<String, String> indirectJarsToTargets;
-  private final String targetLabel;
+  private final Optional<String> targetLabel;
   private final ImmutableList<String> depsArtifacts;
-  private final String strictDepsMode;
-  private final String ruleKind;
+  private final Optional<String> ruleKind;
   private final ImmutableList<String> javacOpts;
 
   private TurbineOptions(
@@ -48,16 +49,16 @@ public class TurbineOptions {
       ImmutableList<String> bootClassPath,
       ImmutableList<String> sources,
       ImmutableList<String> processorPath,
-      ImmutableList<String> processors,
+      ImmutableSet<String> processors,
+      ImmutableSet<String> blacklistedProcessors,
       String tempDir,
       ImmutableList<String> sourceJars,
       @Nullable String outputDeps,
       ImmutableMap<String, String> directJarsToTargets,
       ImmutableMap<String, String> indirectJarsToTargets,
-      String targetLabel,
+      @Nullable String targetLabel,
       ImmutableList<String> depsArtifacts,
-      String strictDepsMode,
-      String ruleKind,
+      @Nullable String ruleKind,
       ImmutableList<String> javacOpts) {
     this.output = checkNotNull(output, "output must not be null");
     this.classPath = checkNotNull(classPath, "classPath must not be null");
@@ -65,6 +66,8 @@ public class TurbineOptions {
     this.sources = checkNotNull(sources, "sources must not be null");
     this.processorPath = checkNotNull(processorPath, "processorPath must not be null");
     this.processors = checkNotNull(processors, "processors must not be null");
+    this.blacklistedProcessors =
+        checkNotNull(blacklistedProcessors, "blacklistedProcessors must not be null");
     this.tempDir = checkNotNull(tempDir, "tempDir must not be null");
     this.sourceJars = checkNotNull(sourceJars, "sourceJars must not be null");
     this.outputDeps = Optional.fromNullable(outputDeps);
@@ -72,10 +75,9 @@ public class TurbineOptions {
         checkNotNull(directJarsToTargets, "directJarsToTargets must not be null");
     this.indirectJarsToTargets =
         checkNotNull(indirectJarsToTargets, "indirectJarsToTargets must not be null");
-    this.targetLabel = checkNotNull(targetLabel, "targetLabel must not be null");
+    this.targetLabel = Optional.fromNullable(targetLabel);
     this.depsArtifacts = checkNotNull(depsArtifacts, "depsArtifacts must not be null");
-    this.strictDepsMode = checkNotNull(strictDepsMode, "strictDepsMode must not be null");
-    this.ruleKind = checkNotNull(ruleKind, "ruleKind must not be null");
+    this.ruleKind = Optional.fromNullable(ruleKind);
     this.javacOpts = checkNotNull(javacOpts, "javacOpts must not be null");
   }
 
@@ -110,8 +112,16 @@ public class TurbineOptions {
   }
 
   /** Annotation processor class names. */
-  public ImmutableList<String> processors() {
+  public ImmutableSet<String> processors() {
     return processors;
+  }
+
+  /**
+   * Annotation processors that require tree pruning to be disabled, for example because they use
+   * internal compiler APIs to inspect information that would be removed during pruning.
+   */
+  public ImmutableSet<String> blacklistedProcessors() {
+    return blacklistedProcessors;
   }
 
   /** Source jars for compilation. */
@@ -135,7 +145,7 @@ public class TurbineOptions {
   }
 
   /** The label of the target being compiled. */
-  public String targetLabel() {
+  public Optional<String> targetLabel() {
     return targetLabel;
   }
 
@@ -144,17 +154,8 @@ public class TurbineOptions {
     return depsArtifacts;
   }
 
-  /**
-   * The Strict Java Deps mode.
-   *
-   * <p>See {@link com.google.devtools.build.buildjar.javac.plugins.dependency.DependencyModule.StrictJavaDeps}.
-   */
-  public String strictDepsMode() {
-    return strictDepsMode;
-  }
-
   /** The kind of the build rule being compiled (e.g. {@code java_library}). */
-  public String ruleKind() {
+  public Optional<String> ruleKind() {
     return ruleKind;
   }
 
@@ -174,7 +175,8 @@ public class TurbineOptions {
     private final ImmutableList.Builder<String> classPath = ImmutableList.builder();
     private final ImmutableList.Builder<String> sources = ImmutableList.builder();
     private final ImmutableList.Builder<String> processorPath = ImmutableList.builder();
-    private final ImmutableList.Builder<String> processors = ImmutableList.builder();
+    private final ImmutableSet.Builder<String> processors = ImmutableSet.builder();
+    private final ImmutableSet.Builder<String> blacklistedProcessors = ImmutableSet.builder();
     private String tempDir;
     private final ImmutableList.Builder<String> sourceJars = ImmutableList.builder();
     private final ImmutableList.Builder<String> bootClassPath = ImmutableList.builder();
@@ -182,10 +184,9 @@ public class TurbineOptions {
     private final ImmutableMap.Builder<String, String> directJarsToTargets = ImmutableMap.builder();
     private final ImmutableMap.Builder<String, String> indirectJarsToTargets =
         ImmutableMap.builder();
-    private String targetLabel;
+    @Nullable private String targetLabel;
     private final ImmutableList.Builder<String> depsArtifacts = ImmutableList.builder();
-    private String strictDepsMode = "OFF";
-    private String ruleKind;
+    @Nullable private String ruleKind;
     private final ImmutableList.Builder<String> javacOpts = ImmutableList.builder();
 
     public TurbineOptions build() {
@@ -196,6 +197,7 @@ public class TurbineOptions {
           sources.build(),
           processorPath.build(),
           processors.build(),
+          blacklistedProcessors.build(),
           tempDir,
           sourceJars.build(),
           outputDeps,
@@ -203,14 +205,8 @@ public class TurbineOptions {
           indirectJarsToTargets.build(),
           targetLabel,
           depsArtifacts.build(),
-          strictDepsMode,
           ruleKind,
           javacOpts.build());
-    }
-
-    public Builder setStrictJavaDeps(String strictDepsMode) {
-      this.strictDepsMode = strictDepsMode;
-      return this;
     }
 
     public Builder setOutput(String output) {
@@ -238,8 +234,13 @@ public class TurbineOptions {
       return this;
     }
 
-    public Builder setProcessors(Iterable<String> processors) {
+    public Builder addProcessors(Iterable<String> processors) {
       this.processors.addAll(processors);
+      return this;
+    }
+
+    public Builder addBlacklistedProcessors(Iterable<String> processors) {
+      this.blacklistedProcessors.addAll(processors);
       return this;
     }
 

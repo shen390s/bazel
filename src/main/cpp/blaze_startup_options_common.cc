@@ -49,7 +49,9 @@ void BlazeStartupOptions::Init() {
   io_nice_level = -1;
   // 3 hours (but only 5 seconds if used within a test)
   max_idle_secs = testing ? 5 : (3 * 3600);
-  webstatus_port = 0;
+  oom_more_eagerly_threshold = 100;
+  command_port = -1;
+  oom_more_eagerly = false;
   watchfs = false;
   invocation_policy = NULL;
 }
@@ -79,7 +81,8 @@ void BlazeStartupOptions::Copy(
   lhs->batch_cpu_scheduling = rhs.batch_cpu_scheduling;
   lhs->io_nice_level = rhs.io_nice_level;
   lhs->max_idle_secs = rhs.max_idle_secs;
-  lhs->webstatus_port = rhs.webstatus_port;
+  lhs->command_port = rhs.command_port;
+  lhs->oom_more_eagerly = rhs.oom_more_eagerly;
   lhs->watchfs = rhs.watchfs;
   lhs->allow_configurable_attributes = rhs.allow_configurable_attributes;
   lhs->fatal_event_bus_exceptions = rhs.fatal_event_bus_exceptions;
@@ -204,6 +207,25 @@ blaze_exit_code::ExitCode BlazeStartupOptions::ProcessArg(
   } else if (GetNullaryOption(arg, "-x")) {
     fprintf(stderr, "WARNING: The -x startup option is now ignored "
             "and will be removed in a future release\n");
+  } else if (GetNullaryOption(arg, "--experimental_oom_more_eagerly")) {
+    oom_more_eagerly = true;
+    option_sources["experimental_oom_more_eagerly"] = rcfile;
+  } else if (GetNullaryOption(arg, "--noexperimental_oom_more_eagerly")) {
+    oom_more_eagerly = false;
+    option_sources["experimental_oom_more_eagerly"] = rcfile;
+  } else if ((value = GetUnaryOption(
+                  arg, next_arg,
+                  "--experimental_oom_more_eagerly_threshold")) != NULL) {
+    if (!blaze_util::safe_strto32(value, &oom_more_eagerly_threshold) ||
+        oom_more_eagerly_threshold < 0) {
+      blaze_util::StringPrintf(error,
+                               "Invalid argument to "
+                               "--experimental_oom_more_eagerly_threshold: "
+                               "'%s'.",
+                               value);
+      return blaze_exit_code::BAD_ARGV;
+    }
+    option_sources["experimental_oom_more_eagerly_threshold"] = rcfile;
   } else if (GetNullaryOption(arg, "--watchfs")) {
     watchfs = true;
     option_sources["watchfs"] = rcfile;
@@ -211,12 +233,13 @@ blaze_exit_code::ExitCode BlazeStartupOptions::ProcessArg(
     watchfs = false;
     option_sources["watchfs"] = rcfile;
   } else if ((value = GetUnaryOption(
-      arg, next_arg, "--use_webstatusserver")) != NULL) {
-    if (!blaze_util::safe_strto32(value, &webstatus_port) ||
-        webstatus_port < 0 || webstatus_port > 65535) {
+      arg, next_arg, "--command_port")) != NULL) {
+    if (!blaze_util::safe_strto32(value, &command_port) ||
+        command_port < -1 || command_port > 65535) {
       blaze_util::StringPrintf(error,
-          "Invalid argument to --use_webstatusserver: '%s'. "
-          "Must be a valid port number or 0 if server disabled.\n", value);
+          "Invalid argument to --command_port: '%s'. "
+          "Must be a valid port number or -1 to disable the gRPC server.\n",
+          value);
       return blaze_exit_code::BAD_ARGV;
     }
     option_sources["webstatusserver"] = rcfile;

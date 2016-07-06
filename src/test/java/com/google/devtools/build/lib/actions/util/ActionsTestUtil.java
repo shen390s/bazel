@@ -24,8 +24,8 @@ import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.devtools.build.lib.actions.AbstractAction;
-import com.google.devtools.build.lib.actions.AbstractActionOwner;
 import com.google.devtools.build.lib.actions.Action;
+import com.google.devtools.build.lib.actions.ActionAnalysisMetadata;
 import com.google.devtools.build.lib.actions.ActionExecutionContext;
 import com.google.devtools.build.lib.actions.ActionGraph;
 import com.google.devtools.build.lib.actions.ActionInputHelper;
@@ -42,6 +42,7 @@ import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.events.EventHandler;
 import com.google.devtools.build.lib.exec.SingleBuildFileCache;
 import com.google.devtools.build.lib.util.FileType;
+import com.google.devtools.build.lib.util.Preconditions;
 import com.google.devtools.build.lib.util.ResourceUsage;
 import com.google.devtools.build.lib.util.io.FileOutErr;
 import com.google.devtools.build.lib.vfs.Path;
@@ -87,7 +88,8 @@ public final class ActionsTestUtil {
     return new ActionExecutionContext(
         executor,
         new SingleBuildFileCache(execRoot.getPathString(), execRoot.getFileSystem()),
-        metadataHandler, fileOutErr,
+        metadataHandler,
+        fileOutErr,
         actionGraph == null
             ? null
             : ActionInputHelper.actionGraphArtifactExpander(actionGraph));
@@ -102,7 +104,11 @@ public final class ActionsTestUtil {
         metadataHandler, fileOutErr,
         new BlockingSkyFunctionEnvironment(buildDriver,
             executor == null ? null : executor.getEventHandler()));
+  }
 
+  public static ActionExecutionContext createContext(EventHandler eventHandler) {
+    DummyExecutor dummyExecutor = new DummyExecutor(eventHandler);
+    return new ActionExecutionContext(dummyExecutor, null, null, null, null);
   }
 
 
@@ -161,31 +167,13 @@ public final class ActionsTestUtil {
     }
   }
 
-  /**
-   * A dummy ActionOwner implementation for use in tests.
-   */
-  public static class NullActionOwner extends AbstractActionOwner {
-    @Override
-    public Label getLabel() {
-      return NULL_LABEL;
-    }
-
-    @Override
-    public String getConfigurationMnemonic() {
-      return "dummy-configuration-mnemonic";
-    }
-
-    @Override
-    public final String getConfigurationChecksum() {
-      return "dummy-configuration";
-    }
-  }
-
   public static final Artifact DUMMY_ARTIFACT = new Artifact(
       new PathFragment("dummy"),
       Root.asSourceRoot(new InMemoryFileSystem().getRootDirectory()));
 
-  public static final ActionOwner NULL_ACTION_OWNER = new NullActionOwner();
+  public static final ActionOwner NULL_ACTION_OWNER =
+      new ActionOwner(
+          NULL_LABEL, null, "dummy-configuration-mnemonic", null, "dummy-configuration", null);
 
   public static final ArtifactOwner NULL_ARTIFACT_OWNER =
       new ArtifactOwner() {
@@ -223,9 +211,11 @@ public final class ActionsTestUtil {
     }
 
     @Override protected String computeKey() { return "action"; }
+
     @Override public ResourceSet estimateResourceConsumption(Executor executor) {
       return ResourceSet.ZERO;
     }
+
     @Override
     public String getMnemonic() {
       return "Null";
@@ -341,7 +331,7 @@ public final class ActionsTestUtil {
   /**
    * Returns the closure over the input files of an action.
    */
-  public Set<Artifact> inputClosureOf(Action action) {
+  public Set<Artifact> inputClosureOf(ActionAnalysisMetadata action) {
     return artifactClosureOf(action.getInputs());
   }
 
@@ -370,7 +360,7 @@ public final class ActionsTestUtil {
       if (!visited.add(current)) {
         continue;
       }
-      Action generatingAction = actionGraph.getGeneratingAction(current);
+      ActionAnalysisMetadata generatingAction = actionGraph.getGeneratingAction(current);
       if (generatingAction != null) {
         Iterables.addAll(toVisit, generatingAction.getInputs());
       }
@@ -413,7 +403,7 @@ public final class ActionsTestUtil {
       if (!visited.add(current)) {
         continue;
       }
-      Action generatingAction = actionGraph.getGeneratingAction(current);
+      ActionAnalysisMetadata generatingAction = actionGraph.getGeneratingAction(current);
       if (generatingAction != null) {
         Iterables.addAll(toVisit, Iterables.filter(generatingAction.getInputs(), allowedArtifacts));
         if (actionClass.isInstance(generatingAction)) {
@@ -433,9 +423,24 @@ public final class ActionsTestUtil {
    * Looks in the given artifacts Iterable for the first Artifact whose path ends with the given
    * suffix and returns its generating Action.
    */
-  public Action getActionForArtifactEndingWith(Iterable<Artifact> artifacts, String suffix) {
+  public Action getActionForArtifactEndingWith(
+      Iterable<Artifact> artifacts, String suffix) {
     Artifact a = getFirstArtifactEndingWith(artifacts, suffix);
-    return a != null ? actionGraph.getGeneratingAction(a) : null;
+
+    if (a == null) {
+      return null;
+    }
+
+    ActionAnalysisMetadata action = actionGraph.getGeneratingAction(a);
+    if (action != null) {
+      Preconditions.checkState(
+          action instanceof Action,
+          "%s is not a proper Action object",
+          action.prettyPrint());
+      return (Action) action;
+    } else {
+      return null;
+    }
   }
 
   /**
@@ -456,7 +461,7 @@ public final class ActionsTestUtil {
    * Returns the first artifact which is an input to "action" and has the
    * specified basename. An assertion error is raised if none is found.
    */
-  public static Artifact getInput(Action action, String basename) {
+  public static Artifact getInput(ActionAnalysisMetadata action, String basename) {
     for (Artifact artifact : action.getInputs()) {
       if (artifact.getExecPath().getBaseName().equals(basename)) {
         return artifact;
@@ -469,7 +474,7 @@ public final class ActionsTestUtil {
    * Returns true if an artifact that is an input to "action" with the specific
    * basename exists.
    */
-  public static boolean hasInput(Action action, String basename) {
+  public static boolean hasInput(ActionAnalysisMetadata action, String basename) {
     try {
       getInput(action, basename);
       return true;
@@ -482,7 +487,7 @@ public final class ActionsTestUtil {
    * Assert that an artifact is the primary output of its generating action.
    */
   public void assertPrimaryInputAndOutputArtifacts(Artifact input, Artifact output) {
-    Action generatingAction = actionGraph.getGeneratingAction(output);
+    ActionAnalysisMetadata generatingAction = actionGraph.getGeneratingAction(output);
     assertThat(generatingAction).isNotNull();
     assertThat(generatingAction.getPrimaryOutput()).isEqualTo(output);
     assertThat(generatingAction.getPrimaryInput()).isEqualTo(input);
@@ -492,7 +497,7 @@ public final class ActionsTestUtil {
    * Returns the first artifact which is an output of "action" and has the
    * specified basename. An assertion error is raised if none is found.
    */
-  public static Artifact getOutput(Action action, String basename) {
+  public static Artifact getOutput(ActionAnalysisMetadata action, String basename) {
     for (Artifact artifact : action.getOutputs()) {
       if (artifact.getExecPath().getBaseName().equals(basename)) {
         return artifact;
@@ -501,7 +506,8 @@ public final class ActionsTestUtil {
     throw new AssertionError("No output with basename '" + basename + "' in action " + action);
   }
 
-  public static void registerActionWith(Action action, MutableActionGraph actionGraph) {
+  public static void registerActionWith(ActionAnalysisMetadata action,
+      MutableActionGraph actionGraph) {
     try {
       actionGraph.registerAction(action);
     } catch (ActionConflictException e) {

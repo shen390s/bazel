@@ -14,6 +14,7 @@
 
 package com.google.devtools.build.lib.bazel.repository;
 
+import com.google.devtools.build.lib.analysis.BlazeDirectories;
 import com.google.devtools.build.lib.analysis.RuleDefinition;
 import com.google.devtools.build.lib.bazel.rules.workspace.GitRepositoryRule;
 import com.google.devtools.build.lib.packages.Rule;
@@ -32,16 +33,18 @@ import java.io.IOException;
  * Clones a Git repository.
  */
 public class GitRepositoryFunction extends RepositoryFunction {
+
   @Override
-  public boolean isLocal() {
+  public boolean isLocal(Rule rule) {
     return false;
   }
 
   @Override
-  public SkyValue fetch(Rule rule, Path outputDirectory, Environment env)
-      throws SkyFunctionException {
+  public SkyValue fetch(
+      Rule rule, Path outputDirectory, BlazeDirectories directories, Environment env)
+          throws SkyFunctionException {
     createDirectory(outputDirectory, rule);
-    GitCloner.clone(rule, outputDirectory, env.getListener());
+    GitCloner.clone(rule, outputDirectory, env.getListener(), clientEnvironment);
     return RepositoryDirectoryValue.create(outputDirectory);
   }
 
