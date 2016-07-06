@@ -36,6 +36,11 @@ if [ "${MACHINE_TYPE}" = 'arm' -o "${MACHINE_TYPE}" = 'armv7l' -o "${MACHINE_TYP
   MACHINE_IS_ARM='yes'
 fi
 
+MACHINE_IS_PPC64LE='no'
+if [ "${MACHINE_TYPE}" = 'ppc64le' ]; then
+  MACHINE_IS_PPC64LE='yes'
+fi
+
 # Extension for executables.
 EXE_EXT=""
 case "${PLATFORM}" in

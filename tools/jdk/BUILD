@@ -97,7 +97,7 @@ filegroup(
 java_toolchain(
     name = "toolchain",
     encoding = "UTF-8",
-    jvm_opts = ["-client"],
+    jvm_opts = ["-server"],
     source_version = "8",
     target_version = "8",
 )

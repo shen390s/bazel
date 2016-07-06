@@ -462,6 +462,8 @@ public final class BuildConfiguration {
                 return "k8";
               case ARM:
                 return "arm";
+	      case PPC64LE:
+		return "ppc64le";
             }
         }
         return "unknown";

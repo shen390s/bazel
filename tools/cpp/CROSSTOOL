@@ -27,6 +27,11 @@ default_toolchain {
   toolchain_identifier: "local_linux"
 }
 default_toolchain {
+  cpu: "ppc64le"
+  toolchain_identifier: "local_linux"
+}
+
+default_toolchain {
   cpu: "x64_windows"
   toolchain_identifier: "local_windows_msys64"
 }

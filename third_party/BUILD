@@ -28,6 +28,7 @@ filegroup(
         ":piii": ["protobuf/protoc-linux-x86_32.exe"],
         ":arm": ["protobuf/protoc-linux-arm32.exe"],
         ":freebsd": ["protobuf/protoc-linux-x86_32.exe"],
+	":ppc64le": ["protobuf/protoc-linux-ppc64le.exe"],
     }),
 )
 
@@ -486,4 +487,9 @@ config_setting(
 config_setting(
     name = "freebsd",
     values = {"host_cpu": "freebsd"},
+)
+
+config_setting(
+    name = "ppc64le",
+    values = {"host_cpu": "ppc64le"},
 )

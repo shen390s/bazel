@@ -44,7 +44,11 @@ linux)
     if [ "${MACHINE_IS_ARM}" = 'yes' ]; then
       PROTOC=${PROTOC:-third_party/protobuf/protoc-linux-arm32.exe}
     else
-      PROTOC=${PROTOC:-third_party/protobuf/protoc-linux-x86_32.exe}
+      if [ "${MACHINE_IS_PPC64LE}" = 'yes' ]; then
+          PROTOC=${PROTOC:-third_party/protobuf/protoc-linux-ppc64le.exe}
+      else
+          PROTOC=${PROTOC:-third_party/protobuf/protoc-linux-x86_32.exe}
+      fi
     fi
   fi
   ;;
@@ -210,7 +214,7 @@ cp src/main/tools/xcode_locator_stub.sh ${ARCHIVE_DIR}/_embedded_binaries/xcode-
 # bazel build using bootstrap version
 function bootstrap_build() {
   "${JAVA_HOME}/bin/java" \
-      -client -Xms256m -XX:NewRatio=4 -XX:+HeapDumpOnOutOfMemoryError -Xverify:none -Dfile.encoding=ISO-8859-1 \
+      -server -Xms256m -XX:NewRatio=4 -XX:+HeapDumpOnOutOfMemoryError -Xverify:none -Dfile.encoding=ISO-8859-1 \
       -XX:HeapDumpPath=${OUTPUT_DIR} \
       -Djava.util.logging.config.file=${OUTPUT_DIR}/javalog.properties \
       -Dio.bazel.UnixFileSystem=0 \
